@@ -70,43 +70,54 @@ cd PureStream-DL
 docker compose up -d --build
 ```
 
-Abre **http://localhost:8000** (instalable como PWA en Android).
+Abre **http://localhost:8000** o la dirección IP/LAN del servidor donde se ejecute.
 
 Verifica la versión corriendo:
 ```bash
 curl -s localhost:8000/api/health
-# {"status":"ok","version":"1.3.1","cookies":...,"gallery_dl_ua":...}
+# {"status":"ok","version":"1.3.2","cookies":...,"gallery_dl_ua":...}
 ```
 
-> El CSS de Tailwind **se compila durante el build de Docker** (no se sirve desde un CDN). Si ejecutas sin Docker, genera el CSS una vez:
+> El CSS de Tailwind **se compila durante el build de Docker** (no se sirve desde un CDN). Si ejecutas sin Docker, genera los assets una vez:
 > ```bash
-> ./tailwindcss -i src/input.css -o static/tailwind.css --minify   # binario standalone
+> ./tailwindcss -i src/input.css -o static/tailwind.css --minify
+> python3 static/gen_icons.py
 > ```
 
 ---
 
 ## Cookies (Instagram y sitios con sesión)
 
-Instagram (y muchos sitios) exigen sesión. Un **único `cookies.txt`** en formato Netscape, con cookies de **varios dominios**, sirve para todos a la vez. Las cookies viven en el **servidor**, así que todos tus dispositivos (Android, PC) las comparten: las configuras una sola vez.
+Instagram (y muchos sitios) exigen sesión. Un **único `cookies.txt`** en formato Netscape, con cookies de **varios dominios**, sirve para todos a la vez. Las cookies viven en el **servidor**, así que todos los dispositivos conectados (Android, PC, etc.) las comparten: se configuran una sola vez.
 
 ### Opción A — Subir desde la web
-1. Exporta `cookies.txt` (Netscape) desde una sesión iniciada en tu navegador:
+1. Exportar `cookies.txt` (Netscape) desde una sesión iniciada en el navegador:
    - Chrome/Edge: extensión **"Get cookies.txt LOCALLY"**.
    - Firefox: **"Export Cookies"**.
    - Estando logueado en el sitio (instagram.com, x.com, …) → exportar.
-2. En la app, botón **🍪** arriba a la derecha → sube el fichero. El punto se pone verde y el tooltip muestra los dominios detectados.
+2. En la app, pulsar el botón **🍪** arriba a la derecha y subir el fichero. El punto se pondrá verde y el tooltip mostrará los dominios detectados.
 
-### Opción B — Montar vía docker-compose (recomendado para homelab; sin móvil)
-1. Pon tu `cookies.txt` junto al `docker-compose.yml`.
-2. Descomenta la línea del volumen:
+### Opción B — Montar vía docker-compose (read-only)
+1. Colocar el `cookies.txt` junto al `docker-compose.yml`.
+2. Descomentar la línea del volumen:
    ```yaml
    volumes:
      - ./data:/data
      - ./cookies.txt:/data/cookies.txt:ro
    ```
-3. `docker compose up -d --build`. El botón 🍪 indicará read-only. Para actualizar: edita el fichero host y `docker compose restart`.
+3. Ejecutar `docker compose up -d --build`. El botón 🍪 indicará read-only. Para actualizar: editar el fichero en el host y reiniciar el contenedor.
 
-> ⚠️ **Seguridad**: el `cookies.txt` concede acceso total a tus cuentas. **No lo compartas ni lo subas a git** (ya está en `.gitignore`). Refresca las cookies si caducan (Instagram expira `sessionid` rápido). Si Instagram sigue redirigiendo a login con cookies válidas, prueba a fijar `GALLERY_DL_UA` al User-Agent de tu navegador (descomentar en `docker-compose.yml`); a veces Instagram rechaza por mismatch de UA, o banea la IP (cambia de red/VPN).
+> ⚠️ **Seguridad**: el `cookies.txt` concede acceso total a las cuentas de las sesiones exportadas. **No debe compartirse ni subirse a git** (ya está en `.gitignore`). Refrescar las cookies si caducan (Instagram expira `sessionid` rápido). Si Instagram sigue redirigiendo a login con cookies válidas, probar fijando `GALLERY_DL_UA` al User-Agent del navegador usado para exportarlas (descomentar en `docker-compose.yml`); a veces Instagram rechaza por mismatch de UA, o banea la IP (cambiar de red/VPN).
+
+---
+
+## Instalación como aplicación (PWA)
+
+PureStream-DL incluye los componentes necesarios para instalarse como aplicación web progresiva: `manifest.json`, Service Worker, iconos PNG 192x192 y 512x512, y tema/soporte para modo oscuro.
+
+**Requisito importante**: los navegadores modernos, incluido Chrome en Android, solo ofrecen la opción de "Añadir a pantalla principal" o "Instalar aplicación" cuando la app se sirve a través de **HTTPS** (o `localhost` en entornos locales). Si se accede por HTTP en una red local o dominio sin certificado, el prompt de instalación no aparecerá aunque todos los archivos PWA estén correctos.
+
+Para habilitar la instalación en Android u otros dispositivos, configure el despliegue detrás de un proxy inverso con TLS (por ejemplo, Caddy, Traefik o nginx con un certificado de Let's Encrypt), o utilice una solución de túnel privado que proporcione HTTPS confiable.
 
 ---
 
@@ -132,7 +143,7 @@ Instagram (y muchos sitios) exigen sesión. Un **único `cookies.txt`** en forma
 
 ## Solución de problemas
 
-- **`No se encontró multimedia` / login redirect en Instagram**: sube/monta cookies válidas (ver arriba).
+- **`No se encontró multimedia` / login redirect en Instagram**: añadir/proporcionar cookies válidas (ver arriba).
 - **Preview gris en vídeos de Twitter**: normal si gallery-dl no aporta poster; la app muestra un frame real del mp4. Si no aparece, puede ser mp4 sin faststart.
 - **403 al descargar**: re-extrae (las URLs del CDN caducan). El proxy devuelve 502 con el código del origen si falla.
 - **`dicts=0` en logs**: pega `docker compose logs media-downloader | grep '\[extract\]'` y el mensaje de error de la web para diagnosticar.

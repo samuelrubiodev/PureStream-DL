@@ -25,6 +25,9 @@ RUN pip install --no-cache-dir -r requirements.txt gallery-dl yt-dlp
 # Código de la aplicación
 COPY . .
 
+# Genera iconos PNG 192/512 para la PWA (Python stdlib, sin dependencias).
+RUN python3 static/gen_icons.py
+
 # Compila el CSS de producción (sin CDN, sin warning de "not for production").
 RUN tailwindcss -i src/input.css -o static/tailwind.css --minify
 

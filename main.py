@@ -37,7 +37,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # Sello de versión: sirve para confirmar que el contenedor corre la imagen
 # nueva (ver /api/health). Si la versión no cuadra, el rebuild no se aplicó.
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 # User-Agent opcional para gallery-dl. Instagram a veces rechaza cookies si el
 # UA no coincide con el navegador origen de la sesión. Copia el UA de tu

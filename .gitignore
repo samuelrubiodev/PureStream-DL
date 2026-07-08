@@ -10,8 +10,10 @@ __pycache__/
 .venv/
 venv/
 
-# Artefacto generado por el build de Docker (Tailwind CLI)
+# Artefactos generados por el build de Docker (Tailwind CLI + iconos PWA)
 static/tailwind.css
+static/icon-192.png
+static/icon-512.png
 
 # OS / editor
 .DS_Store
