@@ -1,0 +1,19 @@
+{
+  "name": "Media Downloader",
+  "short_name": "MediaDL",
+  "description": "Descarga imágenes, carruseles, GIFs y vídeos de Twitter/X e Instagram sin almacenamiento en servidor.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/static/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

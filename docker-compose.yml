@@ -1,0 +1,26 @@
+services:
+  media-downloader:
+    build: .
+    container_name: media-downloader
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      # Tiempos ajustables (segundos)
+      EXTRACT_TIMEOUT: "60"
+      PROXY_TIMEOUT: "300"
+      # Ruta del cookies.txt (auth/config, no media). Instagram casi siempre
+      # lo requiere. Se sube desde la web (botón Cookies) o se monta manualmente.
+      # Un ÚNICO cookies.txt Netscape con varios dominios (instagram.com, x.com,
+      # twitter.com, ...) sirve para todos esos sitios a la vez.
+      COOKIES_FILE: /data/cookies.txt
+      # Opcional: UA del navegador origen de las cookies. Instagram a veces
+      # rechaza cookies si el UA no coincide. Copia el de tu navegador.
+      # GALLERY_DL_UA: "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+    volumes:
+      # Persiste las cookies subidas desde la web entre reinicios.
+      - ./data:/data
+      # ALTERNATIVA SIN WEB: pon tu cookies.txt junto a este docker-compose.yml y
+      # monta read-only. Así no hace falta subir nada desde el móvil/PC. El botón
+      # 🍪 de la web entonces avisará de que es read-only (edítalo en el host).
+      # - ./cookies.txt:/data/cookies.txt:ro

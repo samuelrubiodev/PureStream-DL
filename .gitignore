@@ -1,0 +1,18 @@
+# SECRETS — jamás subir cookies de sesión (acceso total a cuentas)
+data/
+cookies.txt
+*.cookies
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Artefacto generado por el build de Docker (Tailwind CLI)
+static/tailwind.css
+
+# OS / editor
+.DS_Store
+*.swp

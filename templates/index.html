@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="es" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Media Downloader</title>
+  <link rel="manifest" href="/static/manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
+  <link rel="apple-touch-icon" href="/static/icon.svg" />
+
+  <!-- Tailwind CSS compilado en el Dockerfile (autohospedado, sin CDN) -->
+  <link rel="stylesheet" href="/static/tailwind.css" />
+  <style>
+    /* Evita parpadeo: dark por defecto ya aplicado vía <html class="dark"> */
+    .card-img { background-image: linear-gradient(135deg,#1e293b,#0f172a); }
+    /* Spinner */
+    .spinner { border-top-color: transparent; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    /* Soporte para notch en móvil */
+    body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+  </style>
+</head>
+
+<body class="bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 min-h-screen transition-colors">
+
+  <div class="max-w-5xl mx-auto px-4 py-6">
+
+    <!-- Cabecera -->
+    <header class="flex items-center justify-between mb-6">
+      <div class="flex items-center gap-3">
+        <img src="/static/icon.svg" alt="logo" class="w-10 h-10 rounded-xl shadow-lg" />
+        <div>
+          <h1 class="text-xl font-bold leading-tight">Media Downloader</h1>
+          <p class="text-xs text-slate-500 dark:text-slate-400">Twitter/X · Instagram · sin almacenamiento en servidor</p>
+        </div>
+      </div>
+      <div class="flex items-center gap-2">
+        <!-- Cookies (necesarias para Instagram) -->
+        <button id="cookiesBtn" class="px-3 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80 transition text-sm flex items-center gap-2" title="Subir cookies.txt de tu navegador (formato Netscape)">
+          <span id="cookiesDot" class="w-2.5 h-2.5 rounded-full bg-slate-400"></span>
+          <span>🍪</span>
+        </button>
+        <input id="cookiesFile" type="file" accept=".txt,text/plain" class="hidden" />
+        <button id="themeBtn" class="p-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80 transition" title="Cambiar tema">
+          <span id="themeIcon">🌙</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Formulario de extracción -->
+    <section class="bg-white dark:bg-slate-900 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-800 p-4 mb-6">
+      <label for="urlInput" class="block text-sm font-medium mb-2">Pega la URL de la publicación</label>
+      <div class="flex flex-col sm:flex-row gap-2">
+        <input id="urlInput" type="url" inputmode="url" placeholder="https://twitter.com/...  |  https://www.instagram.com/..."
+          class="flex-1 px-4 py-3 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500 placeholder-slate-400 dark:placeholder-slate-500" />
+        <button id="extractBtn"
+          class="px-5 py-3 rounded-xl bg-brand-600 hover:bg-brand-700 text-white font-semibold flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition">
+          <svg id="extractSpinner" class="hidden spinner w-5 h-5 border-2 border-white rounded-full" viewBox="0 0 24 24"></svg>
+          <span id="extractLabel">Extraer</span>
+        </button>
+      </div>
+
+      <!-- Mensaje de error -->
+      <div id="errorBox" class="hidden mt-3 px-4 py-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 text-sm flex items-start justify-between gap-3">
+        <span id="errorText"></span>
+        <button onclick="document.getElementById('errorBox').classList.add('hidden')" class="shrink-0 opacity-70 hover:opacity-100">✕</button>
+      </div>
+    </section>
+
+    <!-- Resultados -->
+    <section id="results" class="hidden">
+      <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <label class="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input id="selectAll" type="checkbox" class="w-4 h-4 accent-brand-600" />
+          Seleccionar todo
+        </label>
+        <div class="flex items-center gap-3">
+          <span id="countLabel" class="text-sm text-slate-500 dark:text-slate-400">0 seleccionados</span>
+          <button id="downloadBtn" disabled
+            class="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition">
+            ⬇ Descargar seleccionados
+          </button>
+        </div>
+      </div>
+
+      <div id="grid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3"></div>
+    </section>
+
+    <!-- Estado vacío -->
+    <section id="empty" class="text-center py-16 text-slate-400 dark:text-slate-600">
+      <div class="text-5xl mb-3">🔗</div>
+      <p>Introduce una URL para ver el contenido.</p>
+    </section>
+  </div>
+
+  <script>
+    // ----------------------------------------------------------------- //
+    // Estado
+    // ----------------------------------------------------------------- //
+    let mediaItems = [];
+
+    const $ = (id) => document.getElementById(id);
+    const urlInput = $('urlInput'), extractBtn = $('extractBtn');
+    const extractSpinner = $('extractSpinner'), extractLabel = $('extractLabel');
+    const errorBox = $('errorBox'), errorText = $('errorText');
+    const results = $('results'), empty = $('empty'), grid = $('grid');
+    const selectAll = $('selectAll'), countLabel = $('countLabel'), downloadBtn = $('downloadBtn');
+
+    // ----------------------------------------------------------------- //
+    // Tema (oscuro por defecto, persistido en localStorage)
+    // ----------------------------------------------------------------- //
+    const savedTheme = localStorage.getItem('theme') || 'dark';
+    applyTheme(savedTheme);
+    $('themeBtn').addEventListener('click', () => {
+      const next = document.documentElement.classList.contains('dark') ? 'light' : 'dark';
+      applyTheme(next); localStorage.setItem('theme', next);
+    });
+    function applyTheme(t) {
+      document.documentElement.classList.toggle('dark', t === 'dark');
+      $('themeIcon').textContent = t === 'dark' ? '☀️' : '🌙';
+    }
+
+    // ----------------------------------------------------------------- //
+    // Cookies (Instagram requiere sesión) — auth/config, no media
+    // ----------------------------------------------------------------- //
+    const cookiesBtn = $('cookiesBtn'), cookiesFile = $('cookiesFile'), cookiesDot = $('cookiesDot');
+
+    async function refreshCookies() {
+      try {
+        const r = await fetch('/api/cookies');
+        const d = await r.json();
+        cookiesDot.className = 'w-2.5 h-2.5 rounded-full ' + (d.configured ? 'bg-emerald-500' : 'bg-red-500');
+        const doms = (d.domains || []).join(', ') || '—';
+        cookiesBtn.title = d.configured
+          ? `Cookies configuradas [${doms}]${d.read_only ? ' (read-only: montadas vía compose, edita el fichero host)' : ''}. Un solo cookies.txt sirve para todos esos dominios.`
+          : 'Sin cookies. Exporta cookies.txt (Netscape) de sesiones iniciadas (multi-dominio: instagram.com, x.com, ...) y súbelo aquí, o móntalo vía docker-compose.';
+      } catch (_) { cookiesDot.className = 'w-2.5 h-2.5 rounded-full bg-slate-400'; }
+    }
+    cookiesBtn.addEventListener('click', () => cookiesFile.click());
+    cookiesFile.addEventListener('change', async () => {
+      if (!cookiesFile.files.length) return;
+      const fd = new FormData();
+      fd.append('file', cookiesFile.files[0]);
+      try {
+        const r = await fetch('/api/cookies', { method: 'POST', body: fd });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'Error al subir cookies'); }
+        const d = await r.json().catch(() => ({}));
+        refreshCookies();
+        showError('Cookies guardadas' + (d.domains && d.domains.length ? ' [' + d.domains.join(', ') + ']' : '') + '. Ya puedes extraer.');
+      } catch (e) { showError('No se guardaron las cookies: ' + e.message); }
+      cookiesFile.value = '';
+    });
+    refreshCookies();
+
+    // ----------------------------------------------------------------- //
+    // Errores
+    // ----------------------------------------------------------------- //
+    function showError(msg) {
+      errorText.textContent = msg;
+      errorBox.classList.remove('hidden');
+    }
+    function clearError() { errorBox.classList.add('hidden'); }
+
+    // ----------------------------------------------------------------- //
+    // Extracción
+    // ----------------------------------------------------------------- //
+    extractBtn.addEventListener('click', extract);
+    urlInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') extract(); });
+
+    async function extract() {
+      const url = urlInput.value.trim();
+      if (!url) { showError('Pega una URL primero.'); return; }
+      clearError();
+      setLoading(true);
+      results.classList.add('hidden');
+      empty.classList.add('hidden');
+
+      try {
+        const resp = await fetch('/api/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }),
+        });
+        if (!resp.ok) {
+          let detail = `Error ${resp.status}`;
+          try { detail = (await resp.json()).detail || detail; } catch (_) {}
+          throw new Error(detail);
+        }
+        const data = await resp.json();
+        if (!data.items || data.items.length === 0) {
+          throw new Error('No se encontró multimedia en esta URL.');
+        }
+        mediaItems = data.items;
+        renderGrid();
+        results.classList.remove('hidden');
+      } catch (e) {
+        showError(e.message || 'Error desconocido al extraer.');
+        empty.classList.remove('hidden');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function setLoading(on) {
+      extractBtn.disabled = on;
+      extractSpinner.classList.toggle('hidden', !on);
+      extractLabel.textContent = on ? 'Extrayendo...' : 'Extraer';
+    }
+
+    // ----------------------------------------------------------------- //
+    // Renderizado del grid
+    // ----------------------------------------------------------------- //
+    function renderGrid() {
+      grid.innerHTML = '';
+      mediaItems.forEach((item, i) => {
+        const card = document.createElement('label');
+        card.className = 'relative group rounded-xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-900 cursor-pointer aspect-square card-img block';
+        card.dataset.index = i;
+        const isVid = item.type === 'video';
+        // Poster real disponible (Instagram da display_url; Twitter vídeo no).
+        const hasPoster = item.thumbnail && item.thumbnail !== item.url;
+
+        if (isVid && !hasPoster) {
+          // Vídeo SIN poster (p. ej. Twitter): mostramos un FRAME REAL del mp4
+          // vía <video preload=metadata> + proxy inline con passthrough de Range.
+          // El navegador baja solo un prefijo -> preview ligero.
+          const v = document.createElement('video');
+          v.src = inlineUrl(item.url) + '#t=0.1';
+          v.preload = 'metadata';
+          v.muted = true;
+          v.playsInline = true;
+          v.className = 'absolute inset-0 w-full h-full object-cover pointer-events-none bg-slate-900';
+          v.onerror = () => { v.remove(); };
+          card.appendChild(v);
+        } else {
+          // Imagen, o vídeo CON poster (Instagram display_url) -> <img> ligero.
+          const thumb = document.createElement('img');
+          thumb.src = inlineUrl(hasPoster ? item.thumbnail : item.url);
+          thumb.loading = 'lazy';
+          thumb.alt = item.filename;
+          thumb.className = 'absolute inset-0 w-full h-full object-cover';
+          thumb.onerror = () => { thumb.remove(); };
+          card.appendChild(thumb);
+        }
+
+        // Badge tipo/dimensiones
+        const badge = document.createElement('div');
+        badge.className = 'absolute top-1.5 right-1.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold bg-black/60 text-white backdrop-blur';
+        badge.textContent = isVid ? (item.duration ? fmtDur(item.duration) : 'VIDEO') : (item.width && item.height ? `${item.width}×${item.height}` : 'IMG');
+        card.appendChild(badge);
+
+        if (isVid) {
+          const play = document.createElement('div');
+          play.className = 'absolute inset-0 flex items-center justify-center pointer-events-none';
+          play.innerHTML = '<span class="w-12 h-12 rounded-full bg-black/50 text-white flex items-center justify-center text-2xl">▶</span>';
+          card.appendChild(play);
+        }
+
+        // Checkbox de selección
+        const wrap = document.createElement('span');
+        wrap.className = 'absolute top-1.5 left-1.5 w-6 h-6 flex items-center justify-center';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox'; cb.value = i; cb.dataset.index = i;
+        cb.className = 'w-5 h-5 accent-brand-600 opacity-90 checked:scale-110 transition';
+        cb.addEventListener('change', onSelectionChange);
+        // Evitar doble toggle al hacer click en el checkbox dentro del label
+        cb.addEventListener('click', (e) => e.stopPropagation());
+        wrap.appendChild(cb);
+        card.appendChild(wrap);
+
+        // Velo de selección
+        const veil = document.createElement('div');
+        veil.className = 'absolute inset-0 ring-4 ring-brand-500 ring-inset opacity-0 pointer-events-none transition';
+        card.appendChild(veil);
+        cb.addEventListener('change', () => veil.classList.toggle('opacity-100', cb.checked));
+
+        grid.appendChild(card);
+      });
+      updateCount();
+    }
+
+    function fmtDur(s) {
+      s = Math.round(s || 0);
+      const m = Math.floor(s / 60), r = s % 60;
+      return `${m}:${r.toString().padStart(2, '0')}`;
+    }
+
+    function onSelectionChange() { updateCount(); }
+
+    selectAll.addEventListener('change', () => {
+      grid.querySelectorAll('input[type=checkbox]').forEach(cb => {
+        cb.checked = selectAll.checked;
+        cb.closest('label').querySelector('.ring-4').classList.toggle('opacity-100', cb.checked);
+      });
+      updateCount();
+    });
+
+    function updateCount() {
+      const n = grid.querySelectorAll('input[type=checkbox]:checked').length;
+      countLabel.textContent = `${n} seleccionado${n === 1 ? '' : 's'}`;
+      downloadBtn.disabled = n === 0;
+      const total = grid.querySelectorAll('input[type=checkbox]').length;
+      selectAll.checked = total > 0 && n === total;
+    }
+
+    // ----------------------------------------------------------------- //
+    // Descarga (streaming nativo vía el proxy del backend)
+    // ----------------------------------------------------------------- //
+    downloadBtn.addEventListener('click', () => {
+      const indexes = [...grid.querySelectorAll('input[type=checkbox]:checked')].map(cb => +cb.dataset.index);
+      downloadBtn.disabled = true;
+      downloadBtn.textContent = 'Descargando...';
+
+      // Disparamos cada descarga escalonada: el navegador gestiona cada
+      // guardado en su almacenamiento local; el servidor solo hace stream.
+      indexes.forEach((idx, k) => {
+        setTimeout(() => triggerDownload(idx), k * 900);
+      });
+
+      // Re-activar el botón tras estimar el fin del lote.
+      setTimeout(() => {
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = '⬇ Descargar seleccionados';
+      }, indexes.length * 900 + 1500);
+    });
+
+    // URL del proxy en modo inline (para previews en el grid).
+    function inlineUrl(u) {
+      return '/api/proxy?url=' + encodeURIComponent(u) + '&inline=1';
+    }
+
+    function triggerDownload(idx) {
+      const item = mediaItems[idx];
+      if (!item) return;
+      const a = document.createElement('a');
+      const params = new URLSearchParams({ url: item.url, filename: item.filename });
+      a.href = '/api/proxy?' + params.toString(); // sin inline -> attachment
+      a.download = item.filename; // pista para el navegador (el server fuerza attachment)
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    // ----------------------------------------------------------------- //
+    // Service Worker (PWA)
+    // ----------------------------------------------------------------- //
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/static/sw.js').catch(() => {});
+      });
+    }
+  </script>
+</body>
+</html>
