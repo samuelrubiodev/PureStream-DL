@@ -37,7 +37,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # Sello de versión: sirve para confirmar que el contenedor corre la imagen
 # nueva (ver /api/health). Si la versión no cuadra, el rebuild no se aplicó.
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 # User-Agent opcional para gallery-dl. Instagram a veces rechaza cookies si el
 # UA no coincide con el navegador origen de la sesión. Copia el UA de tu
@@ -159,6 +159,12 @@ def _parse_gallery_dl(record: dict[str, Any]) -> dict[str, Any] | None:
         return None
     url = record.get("url")
     if not isinstance(url, str) or not url:
+        return None
+    # Rechazar pseudo-URLs no descargables directamente. gallery-dl emite
+    # "ytdl:<https-url>" cuando delega un vídeo a yt-dlp (no hay URL directa del
+    # CDN). Al rechazarlo, el fallback yt-dlp resuelve el vídeo con su URL
+    # directa del CDN (proxyeable). Sin esto, el proxy daría 400 (esquema ytdl).
+    if not url.startswith(("http://", "https://")):
         return None
     ext = (record.get("extension") or "").lower()
     if not ext:

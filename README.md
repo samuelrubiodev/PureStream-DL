@@ -75,7 +75,7 @@ Abre **http://localhost:8000** (instalable como PWA en Android).
 Verifica la versión corriendo:
 ```bash
 curl -s localhost:8000/api/health
-# {"status":"ok","version":"1.3.0","cookies":...,"gallery_dl_ua":...}
+# {"status":"ok","version":"1.3.1","cookies":...,"gallery_dl_ua":...}
 ```
 
 > El CSS de Tailwind **se compila durante el build de Docker** (no se sirve desde un CDN). Si ejecutas sin Docker, genera el CSS una vez:
