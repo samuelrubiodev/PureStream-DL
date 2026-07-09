@@ -423,7 +423,8 @@ def _clean_cookies(src: str, dst: str) -> None:
     with open(dst, "w", encoding="utf-8") as f:
         for h in header:
             f.write(h + "\n")
-        for _, line in sorted(latest.items(), key=lambda kv: kv[1]):
+        # latest[key] = (expires, line_string); ordenar por expiración.
+        for _, line in sorted(latest.values(), key=lambda v: v[0]):
             f.write(line + "\n")
 
 
