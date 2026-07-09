@@ -147,7 +147,8 @@ Para habilitar la instalación en Android u otros dispositivos, configure el des
 - **Preview gris en vídeos de Twitter**: normal si gallery-dl no aporta poster; la app muestra un frame real del mp4. Si no aparece, puede ser mp4 sin faststart.
 - **403 al descargar**: re-extrae (las URLs del CDN caducan). El proxy devuelve 502 con el código del origen si falla.
 - **`dicts=0` en logs**: pega `docker compose logs media-downloader | grep '\[extract\]'` y el mensaje de error de la web para diagnosticar.
-- **Actualizar herramientas**: `docker compose build --no-cache` reinstala la última versión de gallery-dl/yt-dlp.
+- **Actualizar herramientas**: `docker compose build --no-cache` reinstala la última versión de gallery-dl/yt-dlp. Esto es importante porque Instagram/X cambian sus APIs con frecuencia y una versión anterior puede dejar de funcionar de la noche a la mañana.
+- **Instagram deja de funcionar de repente**: es casi siempre un cambio en la API de Instagram no cubierto aún por gallery-dl/yt-dlp. Prueba `docker compose build --no-cache && docker compose up -d`. Si tras eso sigue fallando con `HTTP redirect to home page`, no es un problema de esta aplicación: la sesión o la API están siendo rechazadas por Meta y debe esperarse a una actualización de las herramientas CLI, probar otra red/IP, o verificar que la cuenta no tenga limitaciones/suspensiones.
 
 ---
 

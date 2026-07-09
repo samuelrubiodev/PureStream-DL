@@ -19,8 +19,11 @@ RUN ARCH=$(case "$(uname -m)" in x86_64|amd64) echo linux-x64;; aarch64|arm64) e
 WORKDIR /app
 
 # Dependencias de Python (FastAPI/uvicorn/httpx/multipart) + las herramientas CLI.
+# --upgrade para gallery-dl/yt-dlp: Instagram/X cambian frecuentemente sus APIs
+# y la versión de la imagen base puede quedar obsoleta. Rebuild con --no-cache
+# fuerza la última versión publicada en PyPI.
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gallery-dl yt-dlp
+RUN pip install --no-cache-dir --upgrade -r requirements.txt gallery-dl yt-dlp
 
 # Código de la aplicación
 COPY . .
