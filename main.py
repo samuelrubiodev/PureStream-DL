@@ -359,23 +359,49 @@ def _cookies_ready() -> bool:
     return bool(COOKIES_FILE) and os.path.isfile(COOKIES_FILE)
 
 
+# yt-dlp (y a veces gallery-dl) intenta re-escribir el cookies.txt al salir
+# para persistir cookies nuevas. Si el usuario monta el fichero read-only vía
+# compose, eso falla y las herramientas no funcionan bien. Copiamos el fichero
+# a una ruta writable del contenedor si es necesario.
+_COOKIES_ACTIVE = ""
+
+
+def _cookies_path() -> str:
+    """Devuelve una ruta de cookies usable (writable) para las herramientas."""
+    global _COOKIES_ACTIVE
+    if not _cookies_ready():
+        return ""
+    if _COOKIES_ACTIVE and os.path.isfile(_COOKIES_ACTIVE):
+        return _COOKIES_ACTIVE
+    # Si ya es writable, usarlo directamente (subida web o volumen no :ro).
+    if os.access(COOKIES_FILE, os.W_OK):
+        _COOKIES_ACTIVE = COOKIES_FILE
+        return _COOKIES_ACTIVE
+    # Read-only: copiar a /tmp para que las tools puedan escribir.
+    import shutil
+    tmp = "/tmp/cookies_active.txt"
+    shutil.copy2(COOKIES_FILE, tmp)
+    _COOKIES_ACTIVE = tmp
+    print(f"[cookies] copied read-only {COOKIES_FILE} to writable {tmp}",
+          file=sys.stderr)
+    return tmp
+
+
 def _build_cmd(tool: str, url: str) -> list[str]:
     """Construye la línea de comandos --dump-json según la herramienta."""
-    # Solo pasamos --cookies si el fichero existe (si no, gallery-dl/yt-dlp
-    # abortan con "file not found"). Instagram casi siempre requiere cookies.
-    use_cookies = _cookies_ready()
+    cookies_path = _cookies_path()
     if tool == "gallery-dl":
         cmd = ["gallery-dl", "--dump-json"]
-        if use_cookies:
-            cmd += ["--cookies", COOKIES_FILE]
+        if cookies_path:
+            cmd += ["--cookies", cookies_path]
         if GALLERY_DL_UA:
             cmd += ["-o", f"user-agent={GALLERY_DL_UA}"]
         cmd.append(url)
         return cmd
     # yt-dlp
     cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--no-playlist"]
-    if use_cookies:
-        cmd += ["--cookies", COOKIES_FILE]
+    if cookies_path:
+        cmd += ["--cookies", cookies_path]
     cmd.append(url)
     return cmd
 
@@ -454,9 +480,14 @@ async def extract_media(url: str) -> dict[str, Any]:
             debug.append(f"yt-dlp stdout[:200]={yd_raw[:200]!r}")
         if debug:
             detail += " || DEBUG: " + " | ".join(debug)
-        # Pista de autenticación: Instagram suele requerir cookies/login.
-        if any(k in detail.lower() for k in ("login", "cookie", "401", "unauthorized", "private")):
-            detail += " → prueba configurando COOKIES_FILE (cookies Netscape de tu navegador)."
+        # Pistas de autenticación / User-Agent mismatch.
+        dlow = detail.lower()
+        if any(k in dlow for k in ("login", "cookie", "401", "unauthorized", "private")):
+            detail += " → verifica COOKIES_FILE (cookies Netscape frescas)"
+        if "redirect to home" in dlow or "redirect to login" in dlow:
+            detail += ("; si las cookies son recientes, Instagram detecta el User-Agent: "
+                       "copia el UA exacto de tu navegador en la variable GALLERY_DL_UA "
+                       "(ver docker-compose.yml) y reinicia el contenedor.")
         raise RuntimeError(detail)
 
     return {"items": items, "errors": errors}
