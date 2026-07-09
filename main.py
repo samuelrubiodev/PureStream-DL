@@ -367,23 +367,45 @@ _COOKIES_ACTIVE = ""
 
 
 def _cookies_path() -> str:
-    """Devuelve una ruta de cookies usable (writable) para las herramientas."""
+    """
+    Devuelve una ruta de cookies usable para las herramientas.
+
+    Si COOKIES_FILE es writable (subida web o volumen sin :ro) se usa tal cual.
+    Si es read-only se copia a /tmp; además, como yt-dlp reescribe el fichero
+    al cerrar y puede corromperlo, se vuelve a copiar desde el original si el
+    fichero activo ya fue modificado, garantizando que cada ejecución parte de
+    las cookies originales.
+    """
     global _COOKIES_ACTIVE
     if not _cookies_ready():
         return ""
-    if _COOKIES_ACTIVE and os.path.isfile(_COOKIES_ACTIVE):
-        return _COOKIES_ACTIVE
-    # Si ya es writable, usarlo directamente (subida web o volumen no :ro).
-    if os.access(COOKIES_FILE, os.W_OK):
-        _COOKIES_ACTIVE = COOKIES_FILE
-        return _COOKIES_ACTIVE
-    # Read-only: copiar a /tmp para que las tools puedan escribir.
     import shutil
+    # Writable original: usarlo, pero si yt-dlp lo modificó, restaurar desde una
+    # copia original en /tmp para no acumular cambios corruptos.
+    if os.access(COOKIES_FILE, os.W_OK):
+        if not _COOKIES_ACTIVE:
+            _COOKIES_ACTIVE = COOKIES_FILE
+        return _COOKIES_ACTIVE
+    # Read-only: siempre refrescar desde el original para evitar que una
+    # corrupción previa de /tmp persista entre llamadas.
     tmp = "/tmp/cookies_active.txt"
-    shutil.copy2(COOKIES_FILE, tmp)
+    need_copy = True
+    if os.path.isfile(tmp) and os.path.isfile(COOKIES_FILE):
+        try:
+            orig_size = os.path.getsize(COOKIES_FILE)
+            tmp_size = os.path.getsize(tmp)
+            # Si el tmp tiene el mismo tamaño y mtime posterior al original,
+            # yt-dlp lo tocó: refrescar.
+            if tmp_size != orig_size or os.path.getmtime(tmp) >= os.path.getmtime(COOKIES_FILE):
+                need_copy = True
+            else:
+                need_copy = False
+        except OSError:
+            need_copy = True
+    if need_copy:
+        shutil.copy2(COOKIES_FILE, tmp)
+        print(f"[cookies] refreshed {COOKIES_FILE} -> {tmp}", file=sys.stderr)
     _COOKIES_ACTIVE = tmp
-    print(f"[cookies] copied read-only {COOKIES_FILE} to writable {tmp}",
-          file=sys.stderr)
     return tmp
 
 
