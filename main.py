@@ -467,14 +467,15 @@ def _cookies_path() -> str:
     return tmp
 
 
-def _build_cmd(tool: str, url: str, variant: str = "default") -> list[str]:
+def _build_cmd(tool: str, url: str, variant: str = "default", skip_cookies: bool = False) -> list[str]:
     """
     Construye la línea de comandos --dump-json según la herramienta.
 
     variant="graphql" (gallery-dl) fuerza el extractor legacy de Instagram,
     a veces funciona cuando el API nuevo bloquea la IP del servidor.
+    skip_cookies=True prueba sin cookies (último recurso para posts públicos).
     """
-    cookies_path = _cookies_path()
+    cookies_path = "" if skip_cookies else _cookies_path()
     if tool == "gallery-dl":
         cmd = ["gallery-dl", "--dump-json"]
         if cookies_path:
@@ -546,7 +547,7 @@ async def extract_media(url: str) -> dict[str, Any]:
             try:
                 print("[extract] gallery-dl reintento api=graphql", file=sys.stderr)
                 gql_raw, gql_err, _ = await _run_dump_json(
-                    _build_cmd("gallery-dl", url, variant="graphql"))
+                    _build_cmd("gallery-dl", url, variant="graphql", skip_cookies=False))
                 gql_dicts, gql_errs = _gallery_dl_dicts(gql_raw)
                 print(f"[extract] gallery-dl graphql: dicts={len(gql_dicts)} "
                       f"errs={len(gql_errs)} stdout_bytes={len(gql_raw)} "
@@ -556,6 +557,25 @@ async def extract_media(url: str) -> dict[str, Any]:
                     errors.append(f"[gallery-dl graphql] {' | '.join(gql_errs)}")
             except (RuntimeError, FileNotFoundError) as e:
                 errors.append(f"[gallery-dl graphql] {e}")
+
+        # 1c) Último recurso para Instagram públicos: intentar SIN cookies.
+        # Si las cookies están siendo rechazadas por Meta (redirect to login),
+        # a veces el endpoint público responde un par de veces sin sesión.
+        if not items and "instagram" in url.lower():
+            try:
+                print("[extract] gallery-dl reintento sin cookies (post público)",
+                      file=sys.stderr)
+                pub_raw, pub_err, _ = await _run_dump_json(
+                    _build_cmd("gallery-dl", url, skip_cookies=True))
+                pub_dicts, pub_errs = _gallery_dl_dicts(pub_raw)
+                print(f"[extract] gallery-dl no-cookies: dicts={len(pub_dicts)} "
+                      f"errs={len(pub_errs)} stdout_bytes={len(pub_raw)} "
+                      f"stderr_bytes={len(pub_err)}", file=sys.stderr)
+                _ingest(pub_dicts, _parse_gallery_dl, items, "gallery-dl-public")
+                if pub_errs and not items:
+                    errors.append(f"[gallery-dl public] {' | '.join(pub_errs)}")
+            except (RuntimeError, FileNotFoundError) as e:
+                errors.append(f"[gallery-dl public] {e}")
     except (RuntimeError, FileNotFoundError) as e:
         errors.append(f"[gallery-dl] {e}")
 
