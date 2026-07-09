@@ -78,8 +78,11 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 @app.on_event("startup")
 async def _startup_log() -> None:
     # Línea de log que delata la versión corriendo (para confirmar el rebuild).
+    ready = _cookies_ready()
+    domains = _cookies_domains() if ready else []
     print(f"[extract] Media Downloader v{VERSION} arrancando "
-          f"(cookies={'sí' if _cookies_ready() else 'no'}, "
+          f"(cookies={'sí' if ready else 'no'}, "
+          f"domains={domains}, "
           f"UA_gallery-dl={'sí' if GALLERY_DL_UA else 'no'})", file=sys.stderr)
 
 
@@ -398,8 +401,10 @@ async def extract_media(url: str) -> dict[str, Any]:
         gd_raw, gd_err, _ = await _run_dump_json(_build_cmd("gallery-dl", url))
         gd_dicts, gd_errs = _gallery_dl_dicts(gd_raw)
         # Log de resumen SIEMPRE: dicts, errs, bytes de stdout/stderr.
+        err_preview = " | ".join(gd_errs)[:200] if gd_errs else ""
         print(f"[extract] gallery-dl: dicts={len(gd_dicts)} errs={len(gd_errs)} "
-              f"stdout_bytes={len(gd_raw)} stderr_bytes={len(gd_err)}", file=sys.stderr)
+              f"stdout_bytes={len(gd_raw)} stderr_bytes={len(gd_err)} "
+              f"err_preview={err_preview!r}", file=sys.stderr)
         # Si no sacamos medios pero gallery-dl devolvió algo, vuelca la forma
         # del árbol (claves) para ver dónde están las URLs reales.
         if not gd_dicts and gd_raw.strip():
@@ -549,6 +554,8 @@ async def cookies_upload(file: UploadFile = File(...)):
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, COOKIES_FILE)  # escritura atómica
+        print(f"[cookies] guardado {COOKIES_FILE}: {len(raw)} bytes, domains={sorted(domains)}",
+              file=sys.stderr)
     except OSError as e:
         raise HTTPException(
             status_code=403,

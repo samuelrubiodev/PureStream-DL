@@ -18,3 +18,5 @@ static/icon-512.png
 # OS / editor
 .DS_Store
 *.swp
+# Serena/MCP generated files
+.serena/
