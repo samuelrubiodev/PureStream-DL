@@ -54,7 +54,9 @@ Backend (main.py)
   ├── /api/proxy
   │     └── StreamingResponse proxy to origin CDN (http/https only)
   │         └── Anti-SSRF: known CDN hosts allowed; other hosts resolved
-  │             and rejected if they point to private/loopback/link-local IPs
+  │             and rejected if they point to private/loopback/link-local IPs.
+  │             Redirects are followed manually and each hop is re-validated;
+  │             never turn this into a general open proxy.
   ├── /api/cookies
   │     └── Single Netscape cookies.txt per COOKIES_FILE env var,
   │         usable by multiple domains (Instagram, X/Twitter, etc.)
@@ -68,6 +70,8 @@ Backend (main.py)
 - **Never commit `cookies.txt` or the `data/` directory.** They contain session credentials and are excluded by `.gitignore`.
 - `static/tailwind.css`, `static/icon-192.png`, and `static/icon-512.png` are generated during the Docker build and also excluded from git.
 - The proxy requires the target host to be either a known social CDN or a public IP. Do not relax this into a general open proxy.
+- `cookies.txt` is never served or exposed to clients; uploaded cookies are validated as Netscape format, stored with `0600` permissions, and copied to a writable `/tmp` path for the CLI tools.
+- Subprocess stderr/stdout from gallery-dl/yt-dlp is logged server-side only; error responses to the client are sanitized to avoid leaking credentials or internal details.
 - `VERSION` in `main.py` is the single source of truth; `/api/health` reports it.
 
 ## Cookies and PWA notes (from README)

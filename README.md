@@ -129,15 +129,17 @@ Para habilitar la instalación en Android u otros dispositivos, configure el des
 | `GALLERY_DL_UA` | (none) | User-Agent pasado a gallery-dl (mismatch con cookies → login reject). |
 | `EXTRACT_TIMEOUT` | `60` | Segundos máx. de ejecución de gallery-dl/yt-dlp. |
 | `PROXY_TIMEOUT` | `300` | Segundos máx. de inactividad del proxy de streaming. |
+| `MAX_PROXY_BYTES` | `2147483648` (2 GB) | Tamaño máximo (bytes) de un medio retransmitido por el proxy. |
 
 ---
 
 ## Seguridad
 
 - **Cero almacenamiento de media en servidor**: solo proxy en RAM.
-- **Anti-SSRF** en el proxy: lista blanca de CDN de Twitter/Instagram sin resolución; cualquier otro host se resuelve y se rechaza si apunta a una IP **privada/loopback/link-local/reservada** (p. ej. `169.254.169.169`). Así no se puede abusar del proxy para reached servicios internos.
-- **`cookies.txt`**: auth/config (no media), se guarda en disco solo porque las herramientas lo exigen. Se excluye de git.
+- **Anti-SSRF** en el proxy: lista blanca de CDN de Twitter/Instagram sin resolución; cualquier otro host se resuelve y se rechaza si apunta a una IP **privada/loopback/link-local/reservada** (p. ej. `169.254.169.169`). Los redirects se siguen manualmente y se re-valida cada destino, evitando que un CDN permitido redirija a un servicio interno.
+- **`cookies.txt`**: auth/config (no media), se guarda en disco solo porque las herramientas lo exigen. Se excluye de git y se fijan permisos `0600`.
 - El proxy envía User-Agent realista y **sin Referer** para evitar hotlink-403 de los CDN.
+- Las salidas de subprocess (errores de gallery-dl/yt-dlp) solo se loguean en el servidor; al cliente se devuelve un mensaje genérico para evitar filtración de información.
 
 ---
 

@@ -247,6 +247,11 @@ def _parse_yt_dlp(record: dict[str, Any]) -> dict[str, Any] | None:
 # Ejecución de las herramientas externas
 # --------------------------------------------------------------------------- #
 
+# Límite de salida de las herramientas externas (bytes). Evita OOM si
+# gallery-dl vuelca un perfil completo en lugar de un post.
+MAX_TOOL_OUTPUT = 16 * 1024 * 1024
+
+
 async def _run_dump_json(cmd: list[str]) -> tuple[str, str, int]:
     """
     Ejecuta un comando --dump-json. Devuelve (stdout_text, stderr_text, returncode).
@@ -265,6 +270,11 @@ async def _run_dump_json(cmd: list[str]) -> tuple[str, str, int]:
         proc.kill()
         await proc.wait()
         raise RuntimeError("La extracción tardó demasiado (timeout).")
+
+    if len(stdout) > MAX_TOOL_OUTPUT or len(stderr) > MAX_TOOL_OUTPUT:
+        raise RuntimeError(
+            f"Salida de {cmd[0]} demasiado grande ({len(stdout)} bytes stdout, "
+            f"{len(stderr)} stderr). Probablemente se extrajo más de un post.")
 
     return (stdout.decode("utf-8", "replace"),
             stderr.decode("utf-8", "replace").strip(),
@@ -388,41 +398,33 @@ def _cookies_path() -> str:
     """
     Devuelve una ruta de cookies usable para las herramientas.
 
-    Si COOKIES_FILE es writable (subida web o volumen sin :ro) se usa tal cual.
-    Si es read-only se copia a /tmp; además, como yt-dlp reescribe el fichero
-    al cerrar y puede corromperlo, se vuelve a copiar desde el original si el
-    fichero activo ya fue modificado, garantizando que cada ejecución parte de
-    las cookies originales.
+    NUNCA usamos COOKIES_FILE directamente: yt-dlp reescribe el fichero al
+    cerrar y puede corromperlo o truncarlo. Siempre trabajamos desde una copia
+    en /tmp, refrescada desde el original (subida web o montaje read-only)
+    cuando el original es más reciente o distinto de tamaño.
     """
     global _COOKIES_ACTIVE
+    import shutil
     if not _cookies_ready():
         return ""
-    import shutil
-    # Writable original: usarlo, pero si yt-dlp lo modificó, restaurar desde una
-    # copia original en /tmp para no acumular cambios corruptos.
-    if os.access(COOKIES_FILE, os.W_OK):
-        if not _COOKIES_ACTIVE:
-            _COOKIES_ACTIVE = COOKIES_FILE
-        return _COOKIES_ACTIVE
-    # Read-only: siempre refrescar desde el original para evitar que una
-    # corrupción previa de /tmp persista entre llamadas.
     tmp = "/tmp/cookies_active.txt"
     need_copy = True
     if os.path.isfile(tmp) and os.path.isfile(COOKIES_FILE):
         try:
             orig_size = os.path.getsize(COOKIES_FILE)
             tmp_size = os.path.getsize(tmp)
-            # Si el tmp tiene el mismo tamaño y mtime posterior al original,
-            # yt-dlp lo tocó: refrescar.
-            if tmp_size != orig_size or os.path.getmtime(tmp) >= os.path.getmtime(COOKIES_FILE):
-                need_copy = True
-            else:
+            orig_mtime = os.path.getmtime(COOKIES_FILE)
+            tmp_mtime = os.path.getmtime(tmp)
+            # Refrescar si el original cambió (más reciente o distinto tamaño).
+            if orig_size == tmp_size and abs(tmp_mtime - orig_mtime) < 1:
                 need_copy = False
         except OSError:
             need_copy = True
     if need_copy:
         shutil.copy2(COOKIES_FILE, tmp)
-        print(f"[cookies] refreshed {COOKIES_FILE} -> {tmp}", file=sys.stderr)
+        os.chmod(tmp, 0o600)
+        print(f"[cookies] refreshed {COOKIES_FILE} -> {tmp} ({os.path.getsize(COOKIES_FILE)} bytes)",
+              file=sys.stderr)
     _COOKIES_ACTIVE = tmp
     return tmp
 
@@ -533,19 +535,8 @@ async def extract_media(url: str) -> dict[str, Any]:
             errors.append(f"[yt-dlp] {e}")
 
     if not items:
-        # Sin resultados: exponemos los errores de las herramientas.
+        # Mensaje al usuario: limpio, sin detalles internos de subprocess.
         detail = " | ".join(errors) or "No se encontro multimedia o la URL es privada/invalida."
-        # Muestras brutas para diagnóstico (se ven en el error de la web): revelan
-        # la estructura real que devolvió gallery-dl si el parser no la reconoció.
-        debug = []
-        if gd_raw.strip():
-            debug.append(f"gallery-dl stdout[:2500]={gd_raw[:2500]!r}")
-        if gd_err:
-            debug.append(f"gallery-dl stderr[:200]={gd_err[:200]!r}")
-        if yd_raw.strip():
-            debug.append(f"yt-dlp stdout[:200]={yd_raw[:200]!r}")
-        if debug:
-            detail += " || DEBUG: " + " | ".join(debug)
         # Pistas de autenticación / User-Agent mismatch / IP ban / tool outdated.
         dlow = detail.lower()
         if any(k in dlow for k in ("login", "cookie", "401", "unauthorized", "private")):
@@ -558,6 +549,14 @@ async def extract_media(url: str) -> dict[str, Any]:
                        "gallery-dl/yt-dlp necesitan actualización. Prueba: re-exportar "
                        "cookies en una sesión reciente, fijar GALLERY_DL_UA exacto, "
                        "rebuild con --no-cache para actualizar tools, otra IP/VPN/red móvil.")
+        # Diagnóstico completo SOLO en logs del servidor (no va al cliente).
+        print(f"[extract] FAILED extract for {url}: {detail}", file=sys.stderr)
+        if gd_raw.strip():
+            print(f"[extract] gallery-dl stdout[:2500]={gd_raw[:2500]!r}", file=sys.stderr)
+        if gd_err:
+            print(f"[extract] gallery-dl stderr[:500]={gd_err[:500]!r}", file=sys.stderr)
+        if yd_raw.strip():
+            print(f"[extract] yt-dlp stdout[:500]={yd_raw[:500]!r}", file=sys.stderr)
         raise RuntimeError(detail)
 
     return {"items": items, "errors": errors}
@@ -589,8 +588,13 @@ async def api_extract(payload: dict[str, Any]):
     except RuntimeError as e:
         # Error limpio: la app no se congela, el Frontend lo muestra.
         raise HTTPException(status_code=422, detail=str(e))
+    except HTTPException:
+        raise
     except Exception as e:  # seguridad: captura final ante fallos imprevistos
-        raise HTTPException(status_code=500, detail=f"Error inesperado: {e}")
+        import traceback
+        print(f"[extract] UNEXPECTED ERROR for {url}: {e}\n{traceback.format_exc()}",
+              file=sys.stderr)
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
     return result
 
@@ -640,14 +644,33 @@ async def cookies_upload(file: UploadFile = File(...)):
                    "Edítalo en el host y reinicia, o quita el ':ro' del montaje.",
         )
     raw = await file.read()
+    # Límite de tamaño: un cookies.txt normal no supera 5 MB.
+    if len(raw) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="El fichero de cookies es demasiado grande (>5 MB).")
     text = raw.decode("utf-8", "replace")
-    # Validación mínima de formato Netscape: líneas con >=7 campos separados por tab.
+    # Validación de formato Netscape: dominio, flag, path, secure, expiración,
+    # nombre, valor. Al menos una línea válida.
     domains: set[str] = set()
+    valid_lines = 0
     for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
         parts = line.split("\t")
-        if len(parts) >= 7:
-            domains.add(parts[0].lstrip("."))
-    if not domains:
+        if len(parts) < 7:
+            continue
+        domain, flag, path, secure, expires, name, value = parts[:7]
+        if not domain or not path.startswith("/") or secure not in ("0", "1"):
+            continue
+        try:
+            int(expires)
+        except ValueError:
+            continue
+        if not name:
+            continue
+        domains.add(domain.lstrip("."))
+        valid_lines += 1
+    if valid_lines == 0:
         raise HTTPException(status_code=400, detail="No parece un cookies.txt Netscape válido.")
     os.makedirs(os.path.dirname(os.path.abspath(COOKIES_FILE)), exist_ok=True)
     tmp = COOKIES_FILE + ".tmp"
@@ -655,6 +678,7 @@ async def cookies_upload(file: UploadFile = File(...)):
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(text)
         os.replace(tmp, COOKIES_FILE)  # escritura atómica
+        os.chmod(COOKIES_FILE, 0o600)   # solo el propietario puede leer las credenciales
         print(f"[cookies] guardado {COOKIES_FILE}: {len(raw)} bytes, domains={sorted(domains)}",
               file=sys.stderr)
     except OSError as e:
@@ -701,32 +725,79 @@ async def api_proxy(
     # prefijo del vídeo para mostrar un frame (preview) sin bajarlo entero.
     range_hdr = request.headers.get("range")
     if range_hdr:
+        # Validar formato bytes=start-end (evita enviar basura al origen).
+        if not re.fullmatch(r"bytes=\d+-\d*", range_hdr.strip(), re.IGNORECASE):
+            raise HTTPException(status_code=400, detail="Cabecera Range no válida.")
         headers["Range"] = range_hdr
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(PROXY_TIMEOUT, connect=15.0), follow_redirects=True)
-    req = client.build_request("GET", url, headers=headers)
+    # Anti-SSRF: desactivamos follow_redirects y seguimos manualmente, re-
+    # validando cada Location con host_allowed(). Así un CDN permitido no puede
+    # redirigir a 169.254.169.254 ni a localhost.
+    client = httpx.AsyncClient(timeout=httpx.Timeout(PROXY_TIMEOUT, connect=15.0),
+                                follow_redirects=False)
+
+    async def follow(method: str, target_url: str, hops: int = 0) -> httpx.Response:
+        if hops > 5:
+            raise HTTPException(status_code=502, detail="Demasiados redirects del origen.")
+        tparsed = urlparse(target_url)
+        if tparsed.scheme not in ("http", "https"):
+            raise HTTPException(status_code=400, detail="Esquema de redirect no permitido.")
+        if not host_allowed(tparsed.netloc):
+            raise HTTPException(status_code=403, detail="Dominio de redirect no permitido.")
+        req = client.build_request(method, target_url, headers=headers)
+        try:
+            resp = await client.send(req, stream=True)
+        except httpx.RequestError as e:
+            raise HTTPException(status_code=502, detail=f"Error de red con el origen: {e}")
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("location")
+            await resp.aclose()
+            if not location:
+                raise HTTPException(status_code=502, detail="Redirect sin Location.")
+            # Location relativa: resolver contra URL actual.
+            if location.startswith("//"):
+                location = tparsed.scheme + ":" + location
+            elif location.startswith("/"):
+                location = f"{tparsed.scheme}://{tparsed.netloc}{location}"
+            elif not re.match(r"https?://", location):
+                location = f"{tparsed.scheme}://{tparsed.netloc}{location}"
+            return await follow(method, location, hops + 1)
+        return resp
+
     try:
-        resp = await client.send(req, stream=True)
-    except httpx.RequestError as e:
+        resp = await follow("GET", url)
+    except Exception:
         await client.aclose()
-        raise HTTPException(status_code=502, detail=f"Error de red con el origen: {e}")
+        raise
 
     if resp.status_code >= 400:
         body = await resp.aread()
         await resp.aclose()
         await client.aclose()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Origen devolvió {resp.status_code}: "
-                   f"{body[:200].decode('utf-8', 'replace')}",
-        )
+        # Logueamos el cuerpo del error del origen en servidor, no al cliente.
+        print(f"[proxy] origin error {resp.status_code} for {url}: "
+              f"{body[:500].decode('utf-8', 'replace')}", file=sys.stderr)
+        raise HTTPException(status_code=502, detail="El origen devolvió un error.")
 
     # Content-Type: preferimos el del origen; si no, inferimos de la URL.
     ctype = resp.headers.get("content-type", "").split(";")[0].strip()
     if not ctype:
-        ctype = (mimetypes.guess_type(parsed.path)[0]
+        ctype = (mimetypes.guess_type(urlparse(str(resp.url)).path)[0]
                  or mimetypes.guess_type(fname)[0]
                  or "application/octet-stream")
+
+    # Límite de tamaño: evita descargas descomunalmente grandes o streams
+    # infinitos. Se basa en Content-Length cuando existe; el generator también
+    # corta si se supera el límite durante el stream.
+    MAX_PROXY_BYTES = int(os.getenv("MAX_PROXY_BYTES", str(2 * 1024 * 1024 * 1024)))  # 2 GB
+    try:
+        cl = int(resp.headers.get("content-length", "0"))
+    except ValueError:
+        cl = 0
+    if cl and cl > MAX_PROXY_BYTES:
+        await resp.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=502, detail="El medio excede el tamaño máximo permitido.")
 
     if inline:
         disposition = "inline"
@@ -738,8 +809,17 @@ async def api_proxy(
         cache = "no-store"
 
     async def gen() -> AsyncIterator[bytes]:
+        nonlocal resp
+        total = 0
         try:
             async for chunk in resp.aiter_bytes(chunk_size=CHUNK_SIZE):
+                total += len(chunk)
+                if total > MAX_PROXY_BYTES:
+                    # Origen está enviando más de lo anunciado o no hay
+                    # Content-Length: cortamos el stream para no consumir RAM infinita.
+                    print(f"[proxy] aborted stream for {url}: exceeded {MAX_PROXY_BYTES} bytes",
+                          file=sys.stderr)
+                    break
                 yield chunk
         finally:
             await resp.aclose()
