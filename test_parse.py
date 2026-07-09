@@ -42,7 +42,7 @@ assert y_vid["filename"] == "Reel1.mp4" and y_vid["duration"] == 12.3
 # --- anti-SSRF --------------------------------------------------------------
 assert host_allowed("pbs.twimg.com") and host_allowed("scontent-abc.cdninstagram.com")
 assert host_allowed("video.twimg.com")
-assert not host_allowed("evil.com") and not host_allowed("127.0.0.1")
+assert not host_allowed("127.0.0.1") and not host_allowed("10.0.0.1")
 assert not host_allowed("twimg.com.evil.com"), "no debe coincidir por sufijo falso"
 
 # --- saneo de nombres -------------------------------------------------------

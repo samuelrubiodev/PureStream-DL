@@ -80,9 +80,11 @@ async def _startup_log() -> None:
     # Línea de log que delata la versión corriendo (para confirmar el rebuild).
     ready = _cookies_ready()
     domains = _cookies_domains() if ready else []
+    ig_names = _instagram_cookie_names()
     print(f"[extract] Media Downloader v{VERSION} arrancando "
           f"(cookies={'sí' if ready else 'no'}, "
           f"domains={domains}, "
+          f"instagram_cookie_names={ig_names}, "
           f"UA_gallery-dl={'sí' if GALLERY_DL_UA else 'no'})", file=sys.stderr)
 
 
@@ -135,6 +137,22 @@ def _cookies_domains() -> list[str]:
         if len(parts) >= 7:
             domains.add(parts[0].lstrip("."))
     return sorted(d for d in domains if d)
+
+
+def _instagram_cookie_names() -> list[str]:
+    """Devuelve los nombres de cookies de instagram.com (sin valores)."""
+    if not _cookies_ready():
+        return []
+    names: list[str] = []
+    try:
+        with open(COOKIES_FILE, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 7 and "instagram.com" in parts[0]:
+                    names.append(parts[5])
+    except OSError:
+        pass
+    return names
 
 
 def safe_filename(name: str) -> str:
@@ -528,15 +546,18 @@ async def extract_media(url: str) -> dict[str, Any]:
             debug.append(f"yt-dlp stdout[:200]={yd_raw[:200]!r}")
         if debug:
             detail += " || DEBUG: " + " | ".join(debug)
-        # Pistas de autenticación / User-Agent mismatch / IP ban.
+        # Pistas de autenticación / User-Agent mismatch / IP ban / tool outdated.
         dlow = detail.lower()
         if any(k in dlow for k in ("login", "cookie", "401", "unauthorized", "private")):
             detail += " → verifica COOKIES_FILE (cookies Netscape frescas)"
         if "redirect to home" in dlow or "redirect to login" in dlow:
-            detail += ("; Instagram rechaza la sesión. Si las cookies y el User-Agent "
-                       "son correctos, la IP del servidor puede estar baneada o "
-                       "calificada como bot. Prueba: GALLERY_DL_UA actualizado, "
-                       "cookies recién exportadas, otra IP/VPN/red móvil, o esperar.")
+            detail += ("; Instagram rechaza la sesión. Causas probables: (1) User-Agent "
+                       "no coincide exactamente con el navegador que exportó las cookies, "
+                       "(2) cookies incompletas (deben incluir sessionid, ds_user_id, "
+                       "csrftoken), (3) IP baneada/calificada como bot, o (4) "
+                       "gallery-dl/yt-dlp necesitan actualización. Prueba: re-exportar "
+                       "cookies en una sesión reciente, fijar GALLERY_DL_UA exacto, "
+                       "rebuild con --no-cache para actualizar tools, otra IP/VPN/red móvil.")
         raise RuntimeError(detail)
 
     return {"items": items, "errors": errors}
