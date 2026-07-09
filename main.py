@@ -387,8 +387,13 @@ def _cookies_path() -> str:
     return tmp
 
 
-def _build_cmd(tool: str, url: str) -> list[str]:
-    """Construye la línea de comandos --dump-json según la herramienta."""
+def _build_cmd(tool: str, url: str, variant: str = "default") -> list[str]:
+    """
+    Construye la línea de comandos --dump-json según la herramienta.
+
+    variant="graphql" (gallery-dl) fuerza el extractor legacy de Instagram,
+    a veces funciona cuando el API nuevo bloquea la IP del servidor.
+    """
     cookies_path = _cookies_path()
     if tool == "gallery-dl":
         cmd = ["gallery-dl", "--dump-json"]
@@ -396,6 +401,8 @@ def _build_cmd(tool: str, url: str) -> list[str]:
             cmd += ["--cookies", cookies_path]
         if GALLERY_DL_UA:
             cmd += ["-o", f"user-agent={GALLERY_DL_UA}"]
+        if variant == "graphql":
+            cmd += ["-o", "api=graphql"]
         cmd.append(url)
         return cmd
     # yt-dlp
@@ -450,6 +457,25 @@ async def extract_media(url: str) -> dict[str, Any]:
                 parts.append(gd_err)
             if parts:
                 errors.append("[gallery-dl] " + " | ".join(parts))
+
+        # 1b) Reintento gallery-dl con api=graphql (extractor legacy de
+        # Instagram). Cuando Instagram bloquea/banea la IP del servidor con el
+        # API nuevo, el legacy a veces responde (solo ~5 posts y a menor
+        # calidad, según el autor de gallery-dl).
+        if not items and "instagram" in url.lower():
+            try:
+                print("[extract] gallery-dl reintento api=graphql", file=sys.stderr)
+                gql_raw, gql_err, _ = await _run_dump_json(
+                    _build_cmd("gallery-dl", url, variant="graphql"))
+                gql_dicts, gql_errs = _gallery_dl_dicts(gql_raw)
+                print(f"[extract] gallery-dl graphql: dicts={len(gql_dicts)} "
+                      f"errs={len(gql_errs)} stdout_bytes={len(gql_raw)} "
+                      f"stderr_bytes={len(gql_err)}", file=sys.stderr)
+                _ingest(gql_dicts, _parse_gallery_dl, items, "gallery-dl-graphql")
+                if gql_errs and not items:
+                    errors.append(f"[gallery-dl graphql] {' | '.join(gql_errs)}")
+            except (RuntimeError, FileNotFoundError) as e:
+                errors.append(f"[gallery-dl graphql] {e}")
     except (RuntimeError, FileNotFoundError) as e:
         errors.append(f"[gallery-dl] {e}")
 
@@ -480,14 +506,15 @@ async def extract_media(url: str) -> dict[str, Any]:
             debug.append(f"yt-dlp stdout[:200]={yd_raw[:200]!r}")
         if debug:
             detail += " || DEBUG: " + " | ".join(debug)
-        # Pistas de autenticación / User-Agent mismatch.
+        # Pistas de autenticación / User-Agent mismatch / IP ban.
         dlow = detail.lower()
         if any(k in dlow for k in ("login", "cookie", "401", "unauthorized", "private")):
             detail += " → verifica COOKIES_FILE (cookies Netscape frescas)"
         if "redirect to home" in dlow or "redirect to login" in dlow:
-            detail += ("; si las cookies son recientes, Instagram detecta el User-Agent: "
-                       "copia el UA exacto de tu navegador en la variable GALLERY_DL_UA "
-                       "(ver docker-compose.yml) y reinicia el contenedor.")
+            detail += ("; Instagram rechaza la sesión. Si las cookies y el User-Agent "
+                       "son correctos, la IP del servidor puede estar baneada o "
+                       "calificada como bot. Prueba: GALLERY_DL_UA actualizado, "
+                       "cookies recién exportadas, otra IP/VPN/red móvil, o esperar.")
         raise RuntimeError(detail)
 
     return {"items": items, "errors": errors}
