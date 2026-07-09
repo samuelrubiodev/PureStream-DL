@@ -150,7 +150,11 @@ Para habilitar la instalación en Android u otros dispositivos, configure el des
 - **403 al descargar**: re-extrae (las URLs del CDN caducan). El proxy devuelve 502 con el código del origen si falla.
 - **`dicts=0` en logs**: pega `docker compose logs media-downloader | grep '\[extract\]'` y el mensaje de error de la web para diagnosticar.
 - **Actualizar herramientas**: `docker compose build --no-cache` reinstala la última versión de gallery-dl/yt-dlp. Esto es importante porque Instagram/X cambian sus APIs con frecuencia y una versión anterior puede dejar de funcionar de la noche a la mañana.
-- **Instagram deja de funcionar de repente**: es casi siempre un cambio en la API de Instagram no cubierto aún por gallery-dl/yt-dlp. Prueba `docker compose build --no-cache && docker compose up -d`. Si tras eso sigue fallando con `HTTP redirect to home page`, no es un problema de esta aplicación: la sesión o la API están siendo rechazadas por Meta y debe esperarse a una actualización de las herramientas CLI, probar otra red/IP, o verificar que la cuenta no tenga limitaciones/suspensiones.
+- **Instagram deja de funcionar de repente**: es casi siempre un cambio en la API de Instagram no cubierto aún por gallery-dl/yt-dlp, o Instagram invalidó la sesión actual (p. ej. tras reiniciar/recrear el contenedor, cambiar de red, o por su propia rotación de tokens). Prueba:
+  1. Re-exportar cookies desde una sesión activa en el navegador.
+  2. `docker compose build --no-cache && docker compose up -d`.
+  3. Probar con otra cuenta de Instagram.
+  Si una cuenta funciona y otra no en el mismo servidor/con las mismas cookies, Instagram ha vinculado la sesión de la cuenta problemática a un fingerprint/contexto anterior y no la acepta desde el contenedor. No es un problema de esta aplicación.
 
 ---
 
