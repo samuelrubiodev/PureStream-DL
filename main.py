@@ -394,6 +394,39 @@ def _cookies_ready() -> bool:
 _COOKIES_ACTIVE = ""
 
 
+def _clean_cookies(src: str, dst: str) -> None:
+    """
+    Copia el cookies.txt descartando duplicados: quedarse con la entrada de
+    mayor expiración (timestamp) para cada (domain, path, name). Las cookies
+    viejas acumuladas al exportar varias veces pueden confundir a gallery-dl.
+    """
+    latest: dict[tuple[str, str, str], tuple[int, str]] = {}
+    header: list[str] = []
+    with open(src, "r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                if line.startswith("#"):
+                    header.append(line)
+                continue
+            parts = line.split("\t")
+            if len(parts) < 7:
+                continue
+            try:
+                expires = int(parts[4])
+            except ValueError:
+                expires = 0
+            key = (parts[0], parts[2], parts[5])  # domain, path, name
+            prev = latest.get(key)
+            if prev is None or expires > prev[0]:
+                latest[key] = (expires, line)
+    with open(dst, "w", encoding="utf-8") as f:
+        for h in header:
+            f.write(h + "\n")
+        for _, line in sorted(latest.items(), key=lambda kv: kv[1]):
+            f.write(line + "\n")
+
+
 def _cookies_path() -> str:
     """
     Devuelve una ruta de cookies usable para las herramientas.
@@ -401,7 +434,8 @@ def _cookies_path() -> str:
     NUNCA usamos COOKIES_FILE directamente: yt-dlp reescribe el fichero al
     cerrar y puede corromperlo o truncarlo. Siempre trabajamos desde una copia
     en /tmp, refrescada desde el original (subida web o montaje read-only)
-    cuando el original es más reciente o distinto de tamaño.
+    cuando el original es más reciente o distinto de tamaño. Además se limpian
+    duplicados para evitar cookies viejas mezcladas con nuevas.
     """
     global _COOKIES_ACTIVE
     import shutil
@@ -421,9 +455,12 @@ def _cookies_path() -> str:
         except OSError:
             need_copy = True
     if need_copy:
-        shutil.copy2(COOKIES_FILE, tmp)
+        _clean_cookies(COOKIES_FILE, tmp)
+        shutil.copy2(tmp, tmp + ".clean")  # copia de respaldo para debug
         os.chmod(tmp, 0o600)
-        print(f"[cookies] refreshed {COOKIES_FILE} -> {tmp} ({os.path.getsize(COOKIES_FILE)} bytes)",
+        print(f"[cookies] refreshed+cleaned {COOKIES_FILE} -> {tmp} "
+              f"({os.path.getsize(COOKIES_FILE)} bytes -> {os.path.getsize(tmp)} bytes, "
+              f"{len(_instagram_cookie_names())} ig names)",
               file=sys.stderr)
     _COOKIES_ACTIVE = tmp
     return tmp
