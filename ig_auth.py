@@ -436,12 +436,17 @@ async def _dump_page_state(page, prefix: str = "") -> None:
             ".filter(b => b.offsetParent !== null).slice(0,10)"
             ".map(b => (b.innerText||'').trim().slice(0,30))")
         body = await page.evaluate(
-            "() => (document.body.innerText||'').replace(/\\s+/g,' ').slice(0,300)")
-        dialog = await page.evaluate("() => !!document.querySelector('[role=dialog]')")
+            "() => (document.body.innerText||'').replace(/\\s+/g,' ').slice(0,600)")
+        dialog_text = await page.evaluate(
+            "() => { const d = document.querySelector('[role=dialog]');"
+            "        return d ? (d.innerText||'').replace(/\\s+/g,' ').slice(0,200) : null; }")
+        iframes = await page.evaluate(
+            "() => [...document.querySelectorAll('iframe')].map(f => f.src).slice(0,5)")
         print(f"[ig-auth] {prefix} url={url}", file=sys.stderr)
-        print(f"[ig-auth] {prefix} title={title!r} dialog_cookies={dialog}", file=sys.stderr)
+        print(f"[ig-auth] {prefix} title={title!r}", file=sys.stderr)
         print(f"[ig-auth] {prefix} inputs={inputs}", file=sys.stderr)
         print(f"[ig-auth] {prefix} btns={btns}", file=sys.stderr)
+        print(f"[ig-auth] {prefix} dialog_text={dialog_text!r} iframes={iframes}", file=sys.stderr)
         print(f"[ig-auth] {prefix} body={body!r}", file=sys.stderr)
     except Exception as e:
         print(f"[ig-auth] {prefix} dump falló: {e}", file=sys.stderr)
@@ -600,13 +605,14 @@ async def _resolve_login(page, ctx, cookies_file: str,
     # credenciales fueron rechazadas (la URL sigue en /accounts/login/).
     GRACE = 8
     print("[ig-auth] resolve_login: vigilando resultado del POST", file=sys.stderr)
-    # Capturar respuestas HTTP a /accounts/login/ para ver si el POST salió y
-    # qué devolvió IG (200=re-render login/bot-detect; 302=redirect a feed/2FA).
+    # Capturar TODOS los POST a instagram.com (no solo /accounts/login/: IG puede
+    # loguear vía AJAX a otro endpoint). Si la lista sale vacía, el click no
+    # envió nada -> bot-detect / rate-limit tras muchos intentos / desafío.
     login_responses: list = []
     def _on_resp(r):
         try:
-            if "accounts/login" in r.url:
-                login_responses.append((r.request.method, r.status, r.url))
+            if r.request.method == "POST" and "instagram.com" in r.url:
+                login_responses.append((r.status, r.url))
         except Exception:
             pass
     page.on("response", _on_resp)
@@ -677,12 +683,12 @@ async def _resolve_login(page, ctx, cookies_file: str,
         if time.time() - start > GRACE and is_login_url and usr:
             print(f"[ig-auth] resolve: grace {GRACE}s cumplido y seguimos en /login con campo usuario -> rechazo", file=sys.stderr)
             await _dump_page_state(page, "grace-reject")
-            print(f"[ig-auth] resolve: respuestas POST login={login_responses}", file=sys.stderr)
+            print(f"[ig-auth] resolve: POSTs a instagram={login_responses}", file=sys.stderr)
             return {"status": "error",
                     "error": "Credenciales rechazadas o login bloqueado por Instagram."}
     print("[ig-auth] resolve: timeout sin resolución", file=sys.stderr)
     await _dump_page_state(page, "timeout")
-    print(f"[ig-auth] resolve: respuestas POST login={login_responses}", file=sys.stderr)
+    print(f"[ig-auth] resolve: POSTs a instagram={login_responses}", file=sys.stderr)
     return {"status": "error", "error": "Login: Instagram no respondió a tiempo."}
 
 
