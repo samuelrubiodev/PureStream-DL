@@ -190,27 +190,36 @@ def _playwright_cookie_to_netscape(c: dict[str, Any]) -> str:
 
 
 def robust_write_text(path: str, content: str, mode: int = 0o600) -> None:
-    """Escribe content a path de forma robusta: .tmp + os.replace atómico; si
-    replace falla (EBUSY 'Device or resource busy' en algunos bind mounts de
-    Docker al renombrar sobre /data/cookies.txt), escribe directo al destino.
-    En Linux se puede abrir 'w' aunque otro proceso tenga el fichero en lectura."""
+    """Escribe content a path de forma robusta y PERMANENTE. Intenta .tmp +
+    os.replace (atómico); si replace falla (EBUSY en btrfs al renombrar sobre
+    /data/cookies.txt), escritura directa. Reintenta hasta 3 veces con backoff
+    para errores transitorios (btrfs puede remontar RO un instante y devolver
+    EROFS). Lanza OSError solo si todos los intentos fallan (el caller lo trata
+    como no-fatal: /tmp + storage_state bastan)."""
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     tmp = path + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(content)
-        os.replace(tmp, path)
-        os.chmod(path, mode)
-        return
-    except OSError as e:
-        print(f"[ig-auth] robust_write: replace falló ({e}); escritura directa a {path}", file=sys.stderr)
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(content)
-    os.chmod(path, mode)
+    last_err = None
+    for attempt in range(3):
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+            try:
+                os.replace(tmp, path)
+            except OSError:
+                # rename falla (EBUSY btrfs): escritura directa (no atómica).
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(content)
+            os.chmod(path, mode)
+            return
+        except OSError as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(0.2 * (attempt + 1))  # EROFS transitorio puede despejar
     try:
         os.remove(tmp)
     except OSError:
         pass
+    raise last_err
 
 
 def write_netscape(cookies: list[dict[str, Any]], path: str) -> None:
@@ -531,12 +540,22 @@ async def _fill_login(page, username: str, password: str) -> None:
         await page.press(SEL_PASSWORD, "Enter")
 
 
+# Fichero de trabajo que leen gallery-dl/yt-dlp (ver main._cookies_path). /tmp
+# siempre escribible: aquí deja el refresh las cookies refrescadas para los
+# tools, incluso si COOKIES_FILE está read-only (btrfs remontado RO, montaje
+# :ro, EBUSY encadenado, etc.). storage_state persiste la sesión entre reinicios.
+COOKIES_ACTIVE = "/tmp/cookies_active.txt"
+
+
 async def _finish(ctx, cookies_file: str) -> dict[str, Any]:
-    """Persiste storage_state + cookies (Netscape) y marca el refresco hecho.
-    Guarda storage_state PRIMERO: si la escritura de cookies.txt fallara, la
-    sesión sigue persistida y un refresh posterior re-exporta sin re-login."""
+    """Persiste la sesión: storage_state (source of truth, persistente) +
+    /tmp/cookies_active.txt (fichero de trabajo de los tools) + cookies_file
+    (best-effort: si está read-only falla silenciosamente; /tmp+state bastan).
+    No lanza: el login ya funcionó; persistir es best-effort."""
     global _last_refresh
     cookies = await ctx.cookies()
+    # storage_state PRIMERO (persistente; un refresh posterior re-exporta desde
+    # aquí si /tmp se pierde al reiniciar).
     state_saved = False
     if STATE_FILE:
         try:
@@ -545,11 +564,22 @@ async def _finish(ctx, cookies_file: str) -> dict[str, Any]:
             state_saved = True
         except Exception as e:
             print(f"[ig-auth] _finish: no guardó storage_state: {e}", file=sys.stderr)
+    # /tmp/cookies_active.txt: CRÍTICO, es lo que leen gallery-dl/yt-dlp.
+    tmp_written = False
+    try:
+        write_netscape(cookies, COOKIES_ACTIVE)
+        tmp_written = True
+    except Exception as e:
+        print(f"[ig-auth] _finish: no escribió {COOKIES_ACTIVE}: {e}", file=sys.stderr)
+    # cookies_file (COOKIES_FILE): persistente. Best-effort; read-only -> no fatal.
     if cookies_file:
-        write_netscape(cookies, cookies_file)  # robusto: no suele lanzar
+        try:
+            write_netscape(cookies, cookies_file)
+        except Exception as e:
+            print(f"[ig-auth] _finish: no escribió {cookies_file} (¿read-only?): {e}", file=sys.stderr)
     _last_refresh = time.time()
-    print(f"[ig-auth] _finish: sesión guardada ({len(cookies)} cookies, state={'sí' if state_saved else 'no'})",
-          file=sys.stderr)
+    print(f"[ig-auth] _finish: sesión guardada ({len(cookies)} cookies, "
+          f"state={'sí' if state_saved else 'no'}, tmp={'sí' if tmp_written else 'no'})", file=sys.stderr)
     return {"status": "ok", "cookies": len(cookies)}
 
 

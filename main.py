@@ -447,29 +447,26 @@ def _clean_cookies(src: str, dst: str) -> None:
 
 def _cookies_path() -> str:
     """
-    Devuelve una ruta de cookies usable para las herramientas.
+    Devuelve una ruta de cookies usable para las herramientas: /tmp/cookies_active.txt.
 
-    NUNCA usamos COOKIES_FILE directamente: yt-dlp reescribe el fichero al
-    cerrar y puede corromperlo o truncarlo. Siempre trabajamos desde una copia
-    en /tmp, refrescada desde el original (subida web o montaje read-only)
-    cuando el original es más reciente o distinto de tamaño. Además se limpian
-    duplicados para evitar cookies viejas mezcladas con nuevas.
+    NUNCA usamos COOKIES_FILE directamente (yt-dlp lo reescribe al cerrar y lo
+    corrompe). Copiamos COOKIES_FILE -> /tmp SOLO si COOKIES_FILE es >1s más
+    reciente que /tmp (el host lo actualizó: subida web o nuevo montaje). Si /tmp
+    es más reciente (lo acaba de escribir el refresh de ig_auth con cookies
+    refrescadas), NO machacamos: usamos /tmp tal cual. Así el refresh funciona
+    aunque COOKIES_FILE esté read-only (btrfs RO transitorio, montaje :ro, ...).
     """
     global _COOKIES_ACTIVE
     import shutil
     if not _cookies_ready():
         return ""
-    tmp = "/tmp/cookies_active.txt"
-    need_copy = True
-    if os.path.isfile(tmp) and os.path.isfile(COOKIES_FILE):
+    tmp = ig_auth.COOKIES_ACTIVE if ig_auth is not None else "/tmp/cookies_active.txt"
+    need_copy = not os.path.isfile(tmp)  # /tmp no existe -> copiar desde COOKIES_FILE
+    if not need_copy and os.path.isfile(COOKIES_FILE):
         try:
-            orig_size = os.path.getsize(COOKIES_FILE)
-            tmp_size = os.path.getsize(tmp)
-            orig_mtime = os.path.getmtime(COOKIES_FILE)
-            tmp_mtime = os.path.getmtime(tmp)
-            # Refrescar si el original cambió (más reciente o distinto tamaño).
-            if orig_size == tmp_size and abs(tmp_mtime - orig_mtime) < 1:
-                need_copy = False
+            # Copiar solo si COOKIES_FILE es >1s más nuevo que /tmp (host actualizó).
+            if os.path.getmtime(COOKIES_FILE) > os.path.getmtime(tmp) + 1:
+                need_copy = True
         except OSError:
             need_copy = True
     if need_copy:
