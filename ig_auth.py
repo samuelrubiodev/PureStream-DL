@@ -637,13 +637,37 @@ async def _login_task(s: LoginSession, cookies_file: str) -> None:
                     cks = cookies_to_playwright(cookies_file)
                     if cks:
                         await ctx.add_cookies(cks)
+                        print(f"[ig-auth] login[{s.id}]: bootstrap {len(cks)} cookies desde cookies.txt", file=sys.stderr)
                 page = await ctx.new_page()
+                # Ir a la HOME (no a /accounts/login/): si las cookies/state son
+                # válidos, IG carga el feed (logueado) y solo hay que re-exportar las
+                # cookies (posiblemente refrescadas por IG). Ir directo a
+                # /accounts/login/ REDIRIGE a la home si ya estás logueado, y
+                # _fill_login esperaría un form que no existe -> timeout 45s.
+                await page.goto("https://www.instagram.com/",
+                                wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+                await page.wait_for_timeout(2500)  # dejar que IG asiente/renueve la sesión
+                dismissed = await _dismiss_cookie_banner(page)
+                logged = await _is_logged_in(page)
+                print(f"[ig-auth] login[{s.id}]: home banner={'rechazadas' if dismissed else 'no'} "
+                      f"logged_in={logged} url={page.url}", file=sys.stderr)
+                if logged:
+                    # Ya logueado (cookies/state válidos): re-exportar cookies y
+                    # listo. Resuelve "gallery-dl rechaza el sessionid pero el
+                    # navegador (Chromium real) lo acepta": IG refresca la sesión
+                    # en un contexto de navegador real y re-exportamos cookies
+                    # frescas para gallery-dl. No hace falta login.
+                    print(f"[ig-auth] login[{s.id}]: ya logueado -> re-exporto cookies (no hace falta login)", file=sys.stderr)
+                    await _finish(ctx, cookies_file)
+                    s.status = "ok"
+                    s.error = ""
+                    return
+                # No logueado: ir al form de login y usar las creds.
+                print(f"[ig-auth] login[{s.id}]: no logueado, voy al form de login con creds", file=sys.stderr)
                 await page.goto("https://www.instagram.com/accounts/login/",
                                 wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
-                await page.wait_for_timeout(1500)  # dejar renderizar el banner de cookies si sale
-                dismissed = await _dismiss_cookie_banner(page)  # defensivo: en /login a veces sale (IP UE)
-                print(f"[ig-auth] login[{s.id}]: banner_cookies={'rechazadas' if dismissed else 'no/ya'} "
-                      f"url={page.url}", file=sys.stderr)
+                await page.wait_for_timeout(1500)  # dejar renderizar el banner si sale
+                await _dismiss_cookie_banner(page)
                 await _fill_login(page, s.username, s.password)
                 print(f"[ig-auth] login[{s.id}]: form rellenado+Enter, vigilando resultado", file=sys.stderr)
                 res = await _resolve_login(page, ctx, cookies_file,
