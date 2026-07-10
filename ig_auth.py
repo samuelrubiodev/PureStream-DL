@@ -269,9 +269,19 @@ LOGIN_BTN_RE = re.compile(
     re.IGNORECASE,
 )
 # Campo de código 2FA/challenge. _resolve_login también detecta por URL
-# (two_factor/checkpoint/challenge/verify). Si IG usa otro name, el dump del
-# estado (ver _dump_page_state) lo revela y se añade aquí.
-SEL_2FA_CODE = 'input[name="verificationCode"], input[name="confirmationCode"], input[name="email_code"], input[autocomplete="one-time-code"]'
+# (two_factor/two_step/checkpoint/challenge/verify). El dump real de IG mostró
+# que el campo de código NO tiene name (es input type=text autocomplete=off),
+# así que además de los names comunes probamos el input de texto que no sea el
+# de usuario/email. Ver _dump_page_state.
+SEL_2FA_CODE = ('input[name="verificationCode"], input[name="confirmationCode"], '
+                'input[name="email_code"], input[autocomplete="one-time-code"], '
+                'input[type="text"]:not([name="email"]):not([name="username"])')
+# Botón "Continue" del 2FA (div[role=button]). El container es locale en-US ->
+# "Continue". Regex con verbos comunes; ^...$ excluye "Try another way".
+CONTINUE_BTN_RE = re.compile(
+    r"^(continue|continuar|fortsetzen|continuer|次へ|继续|계속|avanti|dalej)$",
+    re.IGNORECASE,
+)
 
 
 # Modo de lanzamiento de Chromium:
@@ -281,7 +291,11 @@ SEL_2FA_CODE = 'input[name="verificationCode"], input[name="confirmationCode"], 
 #     todos los tells de headless. Xvfb lo instala `playwright install --with-deps
 #     chromium`. Si no hay Xvfb/display, cae a headless.
 #   "new"/"headless"/"1": headless (más ligero, pero IG lo detecta).
-_HEADLESS_MODE = os.getenv("PLAYWRIGHT_HEADLESS", "headed").lower()
+# Defecto "new" (headless): verificado que IG NO bot-detecta el headless para el
+# login (acepta creds y pide 2FA). El modo "headed" (Xvfb) quedó como opt-in por
+# si alguna cuenta lo necesita, pero en tu contenedor headed falla al conectar
+# al X server y cae a headless de todas formas.
+_HEADLESS_MODE = os.getenv("PLAYWRIGHT_HEADLESS", "new").lower()
 _xvfb_proc = None
 
 
@@ -545,7 +559,7 @@ async def _resolve_login(page, ctx, cookies_file: str,
         code2fa = await _visible_exists(page, SEL_2FA_CODE)
         # 2FA/challenge: URL con two_factor/checkpoint/challenge/verify o campo
         # de código visible.
-        is_2fa = ("two_factor" in cur or "checkpoint" in cur
+        is_2fa = ("two_factor" in cur or "two_step" in cur or "checkpoint" in cur
                   or "challenge" in cur or "verify" in cur or code2fa)
         is_login_url = "accounts/login" in cur or "/login" in cur
         # Logueado: URL NO de login/challenge y SIN campo de usuario.
@@ -569,10 +583,16 @@ async def _resolve_login(page, ctx, cookies_file: str,
                 return {"status": "error", "error": "2FA: tiempo de espera agotado."}
             except asyncio.CancelledError:
                 return {"status": "error", "error": "2FA: sesión cancelada."}
-            print("[ig-auth] resolve: código 2FA recibido, rellenando + Enter", file=sys.stderr)
-            await page.fill(SEL_2FA_CODE, code)
-            # IG no tiene <button> visible (ver _fill_login): Enter envía el form.
-            await page.press(SEL_2FA_CODE, "Enter")
+            print("[ig-auth] resolve: código 2FA recibido, rellenando + submit", file=sys.stderr)
+            # .first: SEL_2FA_CODE es una lista CSS; evita strict-mode si matchea >1.
+            await page.locator(SEL_2FA_CODE).first.fill(code)
+            # Click "Continue" (canonical, igual que "Log in"). Fallback Enter.
+            try:
+                await page.get_by_role("button", name=CONTINUE_BTN_RE).click(timeout=10000)
+                print("[ig-auth] resolve: click 'Continue' tras 2FA", file=sys.stderr)
+            except Exception as e:
+                print(f"[ig-auth] resolve: click 'Continue' falló ({e}), fallback Enter", file=sys.stderr)
+                await page.locator(SEL_2FA_CODE).first.press("Enter")
             # Confirmar login tras el 2FA.
             ok_dl = time.time() + NAV_TIMEOUT
             while time.time() < ok_dl:
