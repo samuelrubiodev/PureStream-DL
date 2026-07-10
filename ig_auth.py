@@ -285,34 +285,61 @@ _HEADLESS_MODE = os.getenv("PLAYWRIGHT_HEADLESS", "headed").lower()
 _xvfb_proc = None
 
 
-def _ensure_display() -> bool:
-    """Arranca Xvfb una vez (lazy) y fija DISPLAY=:99. Devuelve True si hay
-    display usable (el que ya hubiera o el Xvfb arrancado)."""
+async def _ensure_display() -> bool:
+    """Arranca Xvfb una vez (lazy) en :99 y fija DISPLAY. Devuelve True SOLO si
+    Xvfb está confirmadamente sirviendo (socket /tmp/.X11-unix/X99 presente y
+    proceso vivo). Así, si Xvfb no arranca a tiempo, _launch cae a headless en
+    vez de lanzar headed sin X y crashar ('Missing X server')."""
     global _xvfb_proc
-    if os.environ.get("DISPLAY"):
-        return True  # ya hay display (xvfb-run, dev local con X)
-    if _xvfb_proc and _xvfb_proc.poll() is None:
-        return True  # ya arrancado por nosotros
+    sock = "/tmp/.X11-unix/X99"
+    lock = "/tmp/.X99-lock"
+    # Nuestro Xvfb sigue vivo y sirviendo.
+    if _xvfb_proc and _xvfb_proc.poll() is None and os.path.exists(sock):
+        return True
+    # Display externo ya presente y sirviendo (xvfb-run / dev con X).
+    ext = os.environ.get("DISPLAY")
+    if ext and not _xvfb_proc:
+        if os.path.exists("/tmp/.X11-unix/X" + ext.lstrip(":")):
+            return True
+    # Limpiar lock/socket huérfanos de un Xvfb previo muerto (impide arrancar).
+    for f in (lock, sock):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
     try:
         _xvfb_proc = subprocess.Popen(
             ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        os.environ["DISPLAY"] = ":99"
-        time.sleep(0.6)  # que Xvfb abra el servidor
-        return True
     except FileNotFoundError:
-        _xvfb_proc = None  # sin xvfb instalado
-        return False
-    except Exception:
         _xvfb_proc = None
+        print("[ig-auth] xvfb: Xvfb no instalado -> headless", file=sys.stderr)
         return False
+    os.environ["DISPLAY"] = ":99"
+    # Esperar a que Xvfb abra el socket (hasta 5s). Solo True si socket + vivo.
+    for _ in range(50):
+        if _xvfb_proc.poll() is not None:
+            print(f"[ig-auth] xvfb: murió al arrancar (exit={_xvfb_proc.returncode}) -> headless",
+                  file=sys.stderr)
+            _xvfb_proc = None
+            return False
+        if os.path.exists(sock):
+            print("[ig-auth] xvfb: arrancado en :99 (socket listo)", file=sys.stderr)
+            return True
+        await asyncio.sleep(0.1)
+    print("[ig-auth] xvfb: no abrió el socket en 5s -> headless", file=sys.stderr)
+    _xvfb_proc = None
+    return False
 
 
 async def _launch(p):
     if _HEADLESS_MODE in ("headed", "false", "0"):
-        if _ensure_display():
-            return await p.chromium.launch(headless=False, args=_LAUNCH_ARGS)
-        # sin xvfb/display: caer a headless
+        if await _ensure_display():
+            try:
+                return await p.chromium.launch(headless=False, args=_LAUNCH_ARGS)
+            except Exception as e:
+                print(f"[ig-auth] launch: headed falló ({e}); fallback headless", file=sys.stderr)
+        # sin xvfb/display usable: headless
     return await p.chromium.launch(headless=True, args=_LAUNCH_ARGS)
 
 
