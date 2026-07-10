@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 import uuid
 from typing import Any
@@ -231,10 +232,15 @@ _LAUNCH_ARGS = [
 
 # Selectores del flujo de login de Instagram. FRÁGILES: IG cambia el DOM a
 # menudo. Centralizados aquí para tocarlos en un solo sitio si cambian.
-SEL_USERNAME = 'input[name="username"]'
-SEL_PASSWORD = 'input[name="password"]'
-SEL_SUBMIT = 'button[type="submit"]'
-SEL_2FA_CODE = 'input[name="verificationCode"], input[autocomplete="one-time-code"], input[name="confirmationCode"]'
+# Verificados con Chrome DevTools MCP (julio 2026): el campo de usuario se
+# llama name="email" (acepta móvil/usuario/email), el de password name="pass".
+# NO hay <button>: el submit es un <input type=submit> OCULTO, así que
+# enviamos el form con Enter en el password (locale-independiente: no depende
+# del texto "Iniciar sesión"/"Log in"). Ver _fill_login.
+SEL_USERNAME = 'input[name="email"], input[name="username"], input[autocomplete*="username"]'
+SEL_PASSWORD = 'input[type="password"], input[name="pass"], input[name="password"]'
+# SEL_SUBMIT no se usa: IG no tiene <button type=submit> visible.
+SEL_2FA_CODE = 'input[name="verificationCode"], input[name="confirmationCode"], input[autocomplete="one-time-code"]'
 
 
 async def _launch(p):
@@ -258,6 +264,43 @@ async def _selector_visible(page, selector: str, timeout_ms: int = 1500) -> bool
     try:
         await page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
         return True
+    except Exception:
+        return False
+
+
+# Banner de consentimiento de cookies de Instagram: modal [role="dialog"] que
+# aparece en la home de IG (IPs UE) en la primera visita y BLOQUEA el formulario
+# de login hasta cerrarlo. El usuario quiere "Rechazar cookies opcionales" (no
+# "Permitir todas"). Locale-robusto: match por palabras clave
+# (rechazar/reject/optional/essential/only/decline...) excluyendo el de aceptar
+# todas (all/todas). Validado contra el DOM real de IG (julio 2026).
+_COOKIE_REJECT_RE = re.compile(
+    r"rechazar|reject|opcionales|optional|esencial|essential|only|decline|no permitir",
+    re.IGNORECASE,
+)
+_COOKIE_ACCEPT_RE = re.compile(r"\ball\b|todas|accept all|permitir todas", re.IGNORECASE)
+
+
+async def _dismiss_cookie_banner(page) -> bool:
+    """Si IG muestra el modal de cookies, pulsa 'Rechazar cookies opcionales'.
+    Idempotente: sin modal devuelve False rápido. No adivina: si no encuentra el
+    botón de rechazar, no clicka 'Permitir todas' (rompería la preferencia)."""
+    try:
+        dialog = page.locator('[role="dialog"]')
+        if await dialog.count() == 0:
+            return False
+        btns = dialog.locator("button")
+        for i in range(await btns.count()):
+            b = btns.nth(i)
+            try:
+                txt = (await b.inner_text()).strip()
+            except Exception:
+                continue
+            if _COOKIE_REJECT_RE.search(txt) and not _COOKIE_ACCEPT_RE.search(txt):
+                await b.click()
+                await page.wait_for_timeout(800)
+                return True
+        return False
     except Exception:
         return False
 
@@ -290,10 +333,13 @@ async def _login_error_visible(page) -> bool:
 
 
 async def _fill_login(page, username: str, password: str) -> None:
-    await page.wait_for_selector(SEL_USERNAME, timeout=NAV_TIMEOUT * 1000)
+    await page.wait_for_selector(SEL_USERNAME, state="visible", timeout=NAV_TIMEOUT * 1000)
     await page.fill(SEL_USERNAME, username)
     await page.fill(SEL_PASSWORD, password)
-    await page.click(SEL_SUBMIT)
+    # IG no tiene <button type=submit> visible: el submit es un input oculto.
+    # Enter en el campo de password envía el form (estándar HTML, sin depender
+    # del idioma del botón "Iniciar sesión"/"Log in").
+    await page.press(SEL_PASSWORD, "Enter")
 
 
 async def _finish(ctx, cookies_file: str) -> dict[str, Any]:
@@ -320,11 +366,17 @@ async def _resolve_login(page, ctx, cookies_file: str,
       via el future, lo introduce y confirma el login.
     `session` (opcional) sirve para que el frontend vea el estado por polling.
     """
-    deadline = time.time() + NAV_TIMEOUT
+    start = time.time()
+    deadline = start + NAV_TIMEOUT
+    # Grace: tiempo mínimo para que IG responda al POST antes de concluir que las
+    # credenciales fueron rechazadas (la URL sigue en /accounts/login/).
+    GRACE = 8
     while time.time() < deadline:
         await page.wait_for_timeout(800)
-        # ¿Pide 2FA / código de verificación?
-        if "two_factor" in page.url.lower() or await _selector_visible(page, SEL_2FA_CODE, 1200):
+        cur = page.url.lower()
+        # ¿Pide 2FA / código de verificación / checkpoint?
+        if ("two_factor" in cur or "checkpoint" in cur
+                or await _selector_visible(page, SEL_2FA_CODE, 1200)):
             if session:
                 session.status = "needs_2fa"
             if twoFA_future is None:
@@ -333,8 +385,6 @@ async def _resolve_login(page, ctx, cookies_file: str,
                         "error": "Instagram exige verificación 2FA. "
                                  "Pulsa 'Renovar sesión' en la web e introduce el código."}
             # Interactivo: esperar el código del usuario.
-            if session:
-                session.status = "needs_2fa"
             try:
                 code = await asyncio.wait_for(asyncio.shield(twoFA_future), timeout=LOGIN_WAIT)
             except asyncio.TimeoutError:
@@ -342,7 +392,8 @@ async def _resolve_login(page, ctx, cookies_file: str,
             except asyncio.CancelledError:
                 return {"status": "error", "error": "2FA: sesión cancelada."}
             await page.fill(SEL_2FA_CODE, code)
-            await page.click(SEL_SUBMIT)
+            # IG no tiene <button> visible (ver _fill_login): Enter envía el form.
+            await page.press(SEL_2FA_CODE, "Enter")
             # Confirmar login tras el 2FA.
             ok_dl = time.time() + NAV_TIMEOUT
             while time.time() < ok_dl:
@@ -355,6 +406,16 @@ async def _resolve_login(page, ctx, cookies_file: str,
         if await _is_logged_in(page):
             return await _finish(ctx, cookies_file)
         if await _login_error_visible(page):
+            return {"status": "error",
+                    "error": "Credenciales rechazadas o login bloqueado por Instagram."}
+        # Tras el grace: si seguimos en el formulario de login, las credenciales
+        # fueron rechazadas. IG re-renderiza /accounts/login/ con el error en
+        # texto plano (clases ofuscadas, sin role=alert ni id estable), así que no
+        # dependemos del elemento de error: una sesión válida navega a / o a
+        # two_factor; si tras 8s seguimos en /login, es rechazo.
+        if (time.time() - start > GRACE
+                and ("accounts/login" in cur or "/login" in cur)
+                and await _selector_visible(page, SEL_USERNAME, 1000)):
             return {"status": "error",
                     "error": "Credenciales rechazadas o login bloqueado por Instagram."}
     return {"status": "error", "error": "Login: Instagram no respondió a tiempo."}
@@ -394,6 +455,7 @@ async def refresh_session_silent(cookies_file: str) -> dict[str, Any]:
                 await page.goto("https://www.instagram.com/",
                                 wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
                 await page.wait_for_timeout(2500)  # dejar que IG asiente/renueve
+                await _dismiss_cookie_banner(page)  # quita el modal de cookies (bloquea el login)
                 if await _is_logged_in(page):
                     return await _finish(ctx, cookies_file)
                 # Sesión muerta. ¿Creds en env para login silencioso (sin 2FA)?
@@ -489,6 +551,7 @@ async def _login_task(s: LoginSession, cookies_file: str) -> None:
                 page = await ctx.new_page()
                 await page.goto("https://www.instagram.com/accounts/login/",
                                 wait_until="domcontentloaded", timeout=NAV_TIMEOUT * 1000)
+                await _dismiss_cookie_banner(page)  # defensivo: en /login no suele salir
                 await _fill_login(page, s.username, s.password)
                 res = await _resolve_login(page, ctx, cookies_file,
                                            twoFA_future=s.twoFA_future, session=s)
