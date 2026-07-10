@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import subprocess
 import sys
 import time
 import uuid
@@ -208,19 +209,37 @@ def write_netscape(cookies: list[dict[str, Any]], path: str) -> None:
 # Playwright: lanzamiento, stealth, detección de estado
 # ------------------------------------------------------------------------- #
 
-# Parches de stealth mínimos (sin dep de playwright-stealth). Cubren los
-# "tells" básicos de headless que Instagram comprueba. Si Instagram sigue
-# detectando, escalar a xvfb en modo headed (no implementado aquí).
+# Parches de stealth. Cubren tells básicos de headless que Instagram comprueba.
+# El tell más fuerte de headless es WebGL "SwiftShader": lo spoofeamos. Además de
+# esto, por defecto lanzamos Chromium headed bajo Xvfb (ver _launch), que
+# elimina casi todos los tells de headless.
 _STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
 Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+try { Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 }); } catch (e) {}
+try { Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 }); } catch (e) {}
 window.chrome = window.chrome || { runtime: {} };
 const _q = window.navigator.permissions && window.navigator.permissions.query;
 if (_q) {
   window.navigator.permissions.query = (p) => p && p.name === 'notifications'
     ? Promise.resolve({ state: Notification.permission }) : _q(p);
 }
+// WebGL: headless reporta vendor/renderer "SwiftShader"/"Google Inc." (tell de
+// bot fuerte). Spoofeamos a Intel (valores de un portátil real).
+try {
+  const patch = (proto) => {
+    if (!proto) return;
+    const gp = proto.getParameter;
+    proto.getParameter = function(p) {
+      if (p === 37445) return 'Intel Inc.';              // UNMASKED_VENDOR_WEBGL
+      if (p === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+      return gp.apply(this, arguments);
+    };
+  };
+  patch(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
+  patch(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
+} catch (e) {}
 """
 
 # Args de Chromium para Docker: /dev/shm pequeño y sandbox necesita no-root.
@@ -229,25 +248,71 @@ _LAUNCH_ARGS = [
     "--disable-dev-shm-usage",
     "--no-sandbox",
     "--disable-gpu",
+    "--no-first-run",
+    "--disable-extensions",
 ]
 
 # Selectores del flujo de login de Instagram. FRÁGILES: IG cambia el DOM a
 # menudo. Centralizados aquí para tocarlos en un solo sitio si cambian.
 # Verificados con Chrome DevTools MCP (julio 2026): el campo de usuario se
 # llama name="email" (acepta móvil/usuario/email), el de password name="pass".
-# NO hay <button>: el submit es un <input type=submit> OCULTO, así que
-# enviamos el form con Enter en el password (locale-independiente: no depende
-# del texto "Iniciar sesión"/"Log in"). Ver _fill_login.
+# El submit es un <div role="button"> "Log in" (visible) + un <input type=submit>
+# oculto. Hacemos CLICK del botón "Log in" (canonical, auto-wait a enabled); el
+# Enter en el password a veces no envía en headless. Ver _fill_login.
 SEL_USERNAME = 'input[name="email"], input[name="username"], input[autocomplete*="username"]'
 SEL_PASSWORD = 'input[type="password"], input[name="pass"], input[name="password"]'
-# SEL_SUBMIT no se usa: IG no tiene <button type=submit> visible.
+# Botón "Log in" (div[role=button]). El container es locale en-US -> "Log in".
+# Regex con verbos comunes por si el locale cambia; ^...$ excluye "Log in with
+# Facebook". get_by_role("button") cubre <button> y [role=button].
+LOGIN_BTN_RE = re.compile(
+    r"^(log in|sign in|iniciar sesión|anmelden|connexion|accedi|ログイン|登录|登入|로그인)$",
+    re.IGNORECASE,
+)
 # Campo de código 2FA/challenge. _resolve_login también detecta por URL
 # (two_factor/checkpoint/challenge/verify). Si IG usa otro name, el dump del
 # estado (ver _dump_page_state) lo revela y se añade aquí.
 SEL_2FA_CODE = 'input[name="verificationCode"], input[name="confirmationCode"], input[name="email_code"], input[autocomplete="one-time-code"]'
 
 
+# Modo de lanzamiento de Chromium:
+#   "headed" (defecto): Chromium headed bajo Xvfb (display virtual). Instagram
+#     bot-detecta el headless y rechaza el login silenciosamente (página de
+#     login limpia, sin error, tras 8s de grace). Headed bajo Xvfb elimina casi
+#     todos los tells de headless. Xvfb lo instala `playwright install --with-deps
+#     chromium`. Si no hay Xvfb/display, cae a headless.
+#   "new"/"headless"/"1": headless (más ligero, pero IG lo detecta).
+_HEADLESS_MODE = os.getenv("PLAYWRIGHT_HEADLESS", "headed").lower()
+_xvfb_proc = None
+
+
+def _ensure_display() -> bool:
+    """Arranca Xvfb una vez (lazy) y fija DISPLAY=:99. Devuelve True si hay
+    display usable (el que ya hubiera o el Xvfb arrancado)."""
+    global _xvfb_proc
+    if os.environ.get("DISPLAY"):
+        return True  # ya hay display (xvfb-run, dev local con X)
+    if _xvfb_proc and _xvfb_proc.poll() is None:
+        return True  # ya arrancado por nosotros
+    try:
+        _xvfb_proc = subprocess.Popen(
+            ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-ac", "-nolisten", "tcp"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        os.environ["DISPLAY"] = ":99"
+        time.sleep(0.6)  # que Xvfb abra el servidor
+        return True
+    except FileNotFoundError:
+        _xvfb_proc = None  # sin xvfb instalado
+        return False
+    except Exception:
+        _xvfb_proc = None
+        return False
+
+
 async def _launch(p):
+    if _HEADLESS_MODE in ("headed", "false", "0"):
+        if _ensure_display():
+            return await p.chromium.launch(headless=False, args=_LAUNCH_ARGS)
+        # sin xvfb/display: caer a headless
     return await p.chromium.launch(headless=True, args=_LAUNCH_ARGS)
 
 
@@ -392,15 +457,18 @@ async def _fill_login(page, username: str, password: str) -> None:
         raise
     await page.fill(SEL_USERNAME, username)
     await page.fill(SEL_PASSWORD, password)
-    # El banner de cookies (modal) puede renderarse tarde y capturar el Enter /
-    # trap el foco, impidiendo enviar el form. El dump contra IG real confirma
-    # que el modal SÍ aparece en /accounts/login/ (IP UE). Lo cerramos JUSTO antes
-    # de pulsar Enter (idempotente: si no hay modal, no hace nada).
+    # El banner de cookies (modal) puede renderarse tarde y capturar el submit /
+    # trap el foco. Lo cerramos justo antes de enviar (idempotente).
     dismissed = await _dismiss_cookie_banner(page)
-    # IG no tiene <button type=submit> visible: el submit es un input oculto.
-    # Enter en el password envía el form (estándar HTML, locale-independiente).
-    print(f"[ig-auth] fill_login: campos rellenos, banner={'cerrado' if dismissed else 'no había'}, Enter", file=sys.stderr)
-    await page.press(SEL_PASSWORD, "Enter")
+    # Click del botón "Log in" (div[role=button], canonical). Más fiable que
+    # Enter en headless: Playwright auto-espera a que esté habilitado (lo está
+    # tras rellenar). Fallback a Enter si no encuentra el botón.
+    try:
+        await page.get_by_role("button", name=LOGIN_BTN_RE).click(timeout=10000)
+        print(f"[ig-auth] fill_login: campos rellenos, banner={'cerrado' if dismissed else 'no'}, click 'Log in'", file=sys.stderr)
+    except Exception as e:
+        print(f"[ig-auth] fill_login: click 'Log in' falló ({e}), fallback Enter", file=sys.stderr)
+        await page.press(SEL_PASSWORD, "Enter")
 
 
 async def _finish(ctx, cookies_file: str) -> dict[str, Any]:
@@ -433,6 +501,16 @@ async def _resolve_login(page, ctx, cookies_file: str,
     # credenciales fueron rechazadas (la URL sigue en /accounts/login/).
     GRACE = 8
     print("[ig-auth] resolve_login: vigilando resultado del POST", file=sys.stderr)
+    # Capturar respuestas HTTP a /accounts/login/ para ver si el POST salió y
+    # qué devolvió IG (200=re-render login/bot-detect; 302=redirect a feed/2FA).
+    login_responses: list = []
+    def _on_resp(r):
+        try:
+            if "accounts/login" in r.url:
+                login_responses.append((r.request.method, r.status, r.url))
+        except Exception:
+            pass
+    page.on("response", _on_resp)
     while time.time() < deadline:
         await page.wait_for_timeout(800)
         cur = page.url.lower()
@@ -494,10 +572,12 @@ async def _resolve_login(page, ctx, cookies_file: str,
         if time.time() - start > GRACE and is_login_url and usr:
             print(f"[ig-auth] resolve: grace {GRACE}s cumplido y seguimos en /login con campo usuario -> rechazo", file=sys.stderr)
             await _dump_page_state(page, "grace-reject")
+            print(f"[ig-auth] resolve: respuestas POST login={login_responses}", file=sys.stderr)
             return {"status": "error",
                     "error": "Credenciales rechazadas o login bloqueado por Instagram."}
     print("[ig-auth] resolve: timeout sin resolución", file=sys.stderr)
     await _dump_page_state(page, "timeout")
+    print(f"[ig-auth] resolve: respuestas POST login={login_responses}", file=sys.stderr)
     return {"status": "error", "error": "Login: Instagram no respondió a tiempo."}
 
 
