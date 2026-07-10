@@ -786,12 +786,13 @@ async def cookies_upload(file: UploadFile = File(...)):
     if valid_lines == 0:
         raise HTTPException(status_code=400, detail="No parece un cookies.txt Netscape válido.")
     os.makedirs(os.path.dirname(os.path.abspath(COOKIES_FILE)), exist_ok=True)
-    tmp = COOKIES_FILE + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, COOKIES_FILE)  # escritura atómica
-        os.chmod(COOKIES_FILE, 0o600)   # solo el propietario puede leer las credenciales
+        if ig_auth is not None:
+            ig_auth.robust_write_text(COOKIES_FILE, text, 0o600)
+        else:
+            with open(COOKIES_FILE, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.chmod(COOKIES_FILE, 0o600)   # solo el propietario puede leer las credenciales
         print(f"[cookies] guardado {COOKIES_FILE}: {len(raw)} bytes, domains={sorted(domains)}",
               file=sys.stderr)
     except OSError as e:
