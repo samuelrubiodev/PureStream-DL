@@ -17,6 +17,18 @@ services:
       # Opcional: UA del navegador origen de las cookies. Instagram a veces
       # rechaza cookies si el UA no coincide. Copia el de tu navegador.
       # GALLERY_DL_UA: "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+      # --- Refresh automático de sesión de Instagram (Playwright, Opción A+D) ---
+      # storage_state de Playwright (cookies+localStorage) persistido en /data.
+      # Renueva la sesión en Chromium sin re-login; se crea en el primer refresco.
+      PLAYWRIGHT_STATE_FILE: /data/playwright_state.json
+      # Auto-refresh silencioso al fallar un extract de IG con "redirect to login".
+      # "1" (defecto) = activado; "0" = desactivado (vuelve al comportamiento solo-cookies).
+      INSTAGRAM_AUTO_REFRESH: "1"
+      # Credenciales OPCIONALES para re-login silencioso cuando la sesión muere
+      # del todo. Si NO las fijas, el re-login se pide UNA vez por la web (UI 2FA).
+      # Mismo nivel de acceso que cookies.txt; el contenedor las lee de este env.
+      # INSTAGRAM_USERNAME: "tu_usuario"
+      # INSTAGRAM_PASSWORD: "tu_password"
     volumes:
       # Persiste las cookies subidas desde la web entre reinicios.
       - ./data:/data

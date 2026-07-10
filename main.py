@@ -37,7 +37,7 @@ STATIC_DIR = os.path.join(BASE_DIR, "static")
 
 # Sello de versión: sirve para confirmar que el contenedor corre la imagen
 # nueva (ver /api/health). Si la versión no cuadra, el rebuild no se aplicó.
-VERSION = "1.3.2"
+VERSION = "1.4.0"
 
 # User-Agent opcional para gallery-dl. Instagram a veces rechaza cookies si el
 # UA no coincide con el navegador origen de la sesión. Copia el UA de tu
@@ -56,6 +56,19 @@ CHUNK_SIZE = 64 * 1024
 # Instagram/Twitter que requiere sesión. Definir con la variable de entorno
 # COOKIES_FILE=/data/cookies.txt  (no se incluye en la imagen por defecto).
 COOKIES_FILE = os.getenv("COOKIES_FILE", "")
+
+# Refresh automático de sesión de Instagram vía Playwright (Opción A+D).
+# Opcional: si Playwright no está instalado, la app sigue funcionando con
+# cookies manuales (comportamiento previo). Ver ig_auth.py e
+# INSTAGRAM_SESSION_REFRESH.md.
+INSTAGRAM_AUTO_REFRESH = os.getenv("INSTAGRAM_AUTO_REFRESH", "1") == "1"
+try:
+    import ig_auth
+    IG_AUTH_AVAILABLE = ig_auth.playwright_available()
+except Exception as _ig_exc:  # noqa: BLE001
+    ig_auth = None  # type: ignore[assignment]
+    IG_AUTH_AVAILABLE = False
+    print(f"[ig_auth] módulo no disponible: {_ig_exc}", file=sys.stderr)
 
 # Lista blanca de dominios del CDN permitidos para el proxy. Evita SSRF:
 # el backend solo retransmite desde los servidores de origen legítimos.
@@ -81,11 +94,15 @@ async def _startup_log() -> None:
     ready = _cookies_ready()
     domains = _cookies_domains() if ready else []
     ig_names = _instagram_cookie_names()
+    ig_pw = IG_AUTH_AVAILABLE
+    ig_st = bool(ig_auth and ig_auth.state_exists())
     print(f"[extract] Media Downloader v{VERSION} arrancando "
           f"(cookies={'sí' if ready else 'no'}, "
           f"domains={domains}, "
           f"instagram_cookie_names={ig_names}, "
-          f"UA_gallery-dl={'sí' if GALLERY_DL_UA else 'no'})", file=sys.stderr)
+          f"UA_gallery-dl={'sí' if GALLERY_DL_UA else 'no'}, "
+          f"playwright={'sí' if ig_pw else 'no'}, "
+          f"ig_state={'sí' if ig_st else 'no'})", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -592,6 +609,45 @@ async def extract_media(url: str) -> dict[str, Any]:
         except (RuntimeError, FileNotFoundError) as e:
             errors.append(f"[yt-dlp] {e}")
 
+    # 3) Auto-refresh de sesión de Instagram (Opción D): si todo falló con la
+    #    marca de "redirect to login", abrir Chromium vía Playwright para
+    #    refrescar la sesión y reintentar gallery-dl/yt-dlp una vez. Silencioso
+    #    en el caso común (reutiliza storage_state, sin pedir nada al usuario).
+    if (not items and "instagram" in url.lower() and INSTAGRAM_AUTO_REFRESH
+            and ig_auth is not None and IG_AUTH_AVAILABLE
+            and COOKIES_FILE and ig_auth.refresh_off_cooldown()):
+        detail_low = " | ".join(errors).lower()
+        # Disparador: marca de login-redirect en los errores, o no hay cookies
+        # pero sí storage_state que pueda refrescarse.
+        if (any(m in detail_low for m in ig_auth.LOGIN_REDIRECT_MARKERS)
+                or (not _cookies_ready() and ig_auth.state_exists())):
+            try:
+                print("[extract] instagram: sesión rechazada -> refrescando vía Playwright",
+                      file=sys.stderr)
+                res = await ig_auth.refresh_session_silent(COOKIES_FILE)
+                print(f"[extract] refresh: {res}", file=sys.stderr)
+                if res.get("status") == "ok":
+                    # Reintentar gallery-dl (y yt-dlp) con las cookies recién
+                    # escritas. _cookies_path() detecta el cambio y re-copia.
+                    gd_raw2, gd_err2, _ = await _run_dump_json(_build_cmd("gallery-dl", url))
+                    gd_dicts2, gd_errs2 = _gallery_dl_dicts(gd_raw2)
+                    _ingest(gd_dicts2, _parse_gallery_dl, items, "gallery-dl-after-refresh")
+                    if not items:
+                        yd_raw2, yd_err2, _ = await _run_dump_json(_build_cmd("yt-dlp", url))
+                        _ingest(_yt_dlp_dicts(yd_raw2), _parse_yt_dlp, items,
+                                "yt-dlp-after-refresh")
+                    if not items and gd_errs2:
+                        errors.append("[ig-refresh] " + " | ".join(gd_errs2))
+                elif res.get("status") in ("needs_2fa", "needs_login"):
+                    errors.append("[ig-refresh] " + res.get("error", ""))
+                else:
+                    errors.append("[ig-refresh] " + res.get("error", "refresco falló."))
+            except Exception as e:
+                import traceback
+                errors.append(f"[ig-refresh] excepción: {e}")
+                print(f"[extract] refresh excepción: {e}\n{traceback.format_exc()}",
+                      file=sys.stderr)
+
     if not items:
         # Mensaje al usuario: limpio, sin detalles internos de subprocess.
         detail = " | ".join(errors) or "No se encontro multimedia o la URL es privada/invalida."
@@ -600,13 +656,12 @@ async def extract_media(url: str) -> dict[str, Any]:
         if any(k in dlow for k in ("login", "cookie", "401", "unauthorized", "private")):
             detail += " → verifica COOKIES_FILE (cookies Netscape frescas)"
         if "redirect to home" in dlow or "redirect to login" in dlow:
-            detail += ("; Instagram rechaza la sesión. Causas probables: (1) User-Agent "
-                       "no coincide exactamente con el navegador que exportó las cookies, "
-                       "(2) cookies incompletas (deben incluir sessionid, ds_user_id, "
-                       "csrftoken), (3) IP baneada/calificada como bot, o (4) "
-                       "gallery-dl/yt-dlp necesitan actualización. Prueba: re-exportar "
-                       "cookies en una sesión reciente, fijar GALLERY_DL_UA exacto, "
-                       "rebuild con --no-cache para actualizar tools, otra IP/VPN/red móvil.")
+            detail += ("; Instagram rechaza la sesión. Pulsa 🔑 'Renovar sesión' en la "
+                       "web para refrescarla automáticamente con Playwright. Si aun así "
+                       "falla: (1) GALLERY_DL_UA no coincide con el navegador que exportó "
+                       "las cookies, (2) cookies incompletas (sessionid, ds_user_id, "
+                       "csrftoken), o (3) la sesión murió del todo y hace falta re-login "
+                       "con credenciales (INSTAGRAM_USERNAME/PASSWORD o login por la web).")
         # Diagnóstico completo SOLO en logs del servidor (no va al cliente).
         print(f"[extract] FAILED extract for {url}: {detail}", file=sys.stderr)
         if gd_raw.strip():
@@ -745,6 +800,93 @@ async def cookies_upload(file: UploadFile = File(...)):
             detail=f"No se pudo escribir el cookies.txt (¿montado read-only?): {e}",
         )
     return {"configured": True, "bytes": len(raw), "domains": sorted(domains)}
+
+
+# --------------------------------------------------------------------------- #
+# Refresh / login de sesión de Instagram (Playwright — Opción A+D)
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/auth/instagram/state")
+async def ig_auth_state():
+    """
+    Estado del sistema de refresh de Instagram. El frontend lo usa para decidir
+    qué UI mostrar (solo código 2FA vs login completo con usuario/contraseña):
+      - playwright: si Playwright está instalado en el contenedor.
+      - auto_refresh: si el auto-refresh silencioso está activo.
+      - state_file: si hay storage_state persistido (sesión reutilizable).
+      - env_creds: si hay INSTAGRAM_USERNAME/PASSWORD (login silencioso posible).
+      - cookies: si hay cookies.txt presente.
+    """
+    return {
+        "playwright": IG_AUTH_AVAILABLE,
+        "auto_refresh": INSTAGRAM_AUTO_REFRESH,
+        "state_file": bool(ig_auth and ig_auth.state_exists()),
+        "env_creds": bool(ig_auth and ig_auth.env_creds_set()),
+        "cookies": _cookies_ready(),
+    }
+
+
+@app.post("/api/auth/instagram/refresh")
+async def ig_auth_refresh():
+    """
+    Refresco silencioso MANUAL (sin interacción): reutiliza storage_state, abre
+    IG en Chromium headless y re-exporta cookies a COOKIES_FILE. Úsalo cuando
+    /api/extract avise de sesión caducada y quieras forzar el refresco ya.
+    Devuelve {"status":"ok","cookies":N} o {status:needs_login|needs_2fa|error}.
+    """
+    if ig_auth is None or not IG_AUTH_AVAILABLE:
+        raise HTTPException(status_code=503,
+                            detail="Playwright no instalado en este contenedor "
+                                   "(rebuild con el Dockerfile actualizado).")
+    if not COOKIES_FILE:
+        raise HTTPException(status_code=400, detail="COOKIES_FILE no configurado.")
+    res = await ig_auth.refresh_session_silent(COOKIES_FILE)
+    # needs_login/needs_2fa/error se devuelven 200 con status para que el
+    # frontend actúe (mostrar login / pedir 2FA / mostrar error).
+    return JSONResponse(res)
+
+
+@app.post("/api/auth/instagram")
+async def ig_auth_login(payload: dict[str, Any]):
+    """
+    Inicia login interactivo de Instagram. Creds: body (username/password)
+    opcional > env INSTAGRAM_USERNAME/PASSWORD. Si IG pide 2FA, el frontend
+    consulta /api/auth/instagram/status y envía el código a /2fa.
+    La password del body NO se persiste (solo se usa para esta sesión).
+    """
+    if ig_auth is None or not IG_AUTH_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Playwright no instalado.")
+    if not COOKIES_FILE:
+        raise HTTPException(status_code=400, detail="COOKIES_FILE no configurado.")
+    username = (payload.get("username") or "").strip() or None
+    password = (payload.get("password") or "").strip() or None
+    res = await ig_auth.start_login(COOKIES_FILE, username=username, password=password)
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("error", "No se pudo iniciar login."))
+    return res
+
+
+@app.get("/api/auth/instagram/status")
+async def ig_auth_status(session_id: str = Query(..., description="ID de sesión de login")):
+    """Polling del estado de un login en curso (logging_in/needs_2fa/ok/error)."""
+    if ig_auth is None:
+        raise HTTPException(status_code=503, detail="Playwright no instalado.")
+    return ig_auth.session_status(session_id)
+
+
+@app.post("/api/auth/instagram/2fa")
+async def ig_auth_2fa(payload: dict[str, Any]):
+    """Entrega el código 2FA del usuario a la sesión de login en espera."""
+    if ig_auth is None:
+        raise HTTPException(status_code=503, detail="Playwright no instalado.")
+    session_id = (payload.get("session_id") or "").strip()
+    code = (payload.get("code") or "").strip()
+    if not session_id or not code:
+        raise HTTPException(status_code=400, detail="Falta session_id o code.")
+    res = await ig_auth.submit_2fa(session_id, code)
+    if res.get("status") == "error":
+        raise HTTPException(status_code=400, detail=res.get("error", "2FA falló."))
+    return res
 
 
 @app.get("/api/proxy")
@@ -914,6 +1056,8 @@ async def health():
         "version": VERSION,
         "cookies": _cookies_ready(),
         "gallery_dl_ua": bool(GALLERY_DL_UA),
+        "playwright": IG_AUTH_AVAILABLE,
+        "ig_state": bool(ig_auth and ig_auth.state_exists()),
     }
 
 

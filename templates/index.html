@@ -43,6 +43,10 @@
           <span>🍪</span>
         </button>
         <input id="cookiesFile" type="file" accept=".txt,text/plain" class="hidden" />
+        <!-- Renovar sesión de Instagram (Playwright): refresca cookies en Chromium -->
+        <button id="igBtn" class="px-3 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80 transition text-sm flex items-center gap-2" title="Renovar sesión de Instagram (Playwright)">
+          <span>🔑</span>
+        </button>
         <button id="themeBtn" class="p-2 rounded-lg bg-slate-200 dark:bg-slate-800 hover:opacity-80 transition" title="Cambiar tema">
           <span id="themeIcon">🌙</span>
         </button>
@@ -63,9 +67,12 @@
       </div>
 
       <!-- Mensaje de error -->
-      <div id="errorBox" class="hidden mt-3 px-4 py-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 text-sm flex items-start justify-between gap-3">
-        <span id="errorText"></span>
-        <button onclick="document.getElementById('errorBox').classList.add('hidden')" class="shrink-0 opacity-70 hover:opacity-100">✕</button>
+      <div id="errorBox" class="hidden mt-3 px-4 py-3 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-red-700 dark:text-red-300 text-sm">
+        <div class="flex items-start justify-between gap-3">
+          <span id="errorText"></span>
+          <button onclick="document.getElementById('errorBox').classList.add('hidden')" class="shrink-0 opacity-70 hover:opacity-100">✕</button>
+        </div>
+        <button id="errorAction" class="hidden mt-2 px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-xs font-semibold"></button>
       </div>
     </section>
 
@@ -93,6 +100,34 @@
       <div class="text-5xl mb-3">🔗</div>
       <p>Introduce una URL para ver el contenido.</p>
     </section>
+
+    <!-- Modal: sesión de Instagram (refresh / login / 2FA con Playwright) -->
+    <div id="igModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <div class="bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 w-full max-w-sm p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h2 class="text-lg font-bold">🔑 Sesión de Instagram</h2>
+          <button onclick="closeIgModal()" class="opacity-70 hover:opacity-100">✕</button>
+        </div>
+        <p id="igStatus" class="text-sm text-slate-600 dark:text-slate-300 mb-3"></p>
+        <!-- Credenciales (solo si no hay env INSTAGRAM_USERNAME/PASSWORD) -->
+        <div id="igCreds" class="hidden mb-3 space-y-2">
+          <input id="igUser" type="text" autocomplete="username" placeholder="Usuario de Instagram" class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          <input id="igPass" type="password" autocomplete="current-password" placeholder="Contraseña" class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          <p class="text-xs text-slate-500 dark:text-slate-400">Solo se usa para esta sesión; la contraseña no se guarda (sí el storage_state de la sesión resultante).</p>
+        </div>
+        <!-- Código 2FA -->
+        <div id="ig2fa" class="hidden mb-3 space-y-2">
+          <input id="igCode" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="Código de verificación" class="w-full px-3 py-2 rounded-lg bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+          <p class="text-xs text-slate-500 dark:text-slate-400">Instagram te habrá enviado un código (email/teléfono). Introdúcelo una sola vez.</p>
+        </div>
+        <div class="flex flex-wrap gap-2 justify-end">
+          <button id="igRefreshBtn" onclick="igRefresh()" class="px-3 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold">Renovar sesión</button>
+          <button id="igLoginBtn" onclick="igLogin()" class="hidden px-3 py-2 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold">Iniciar sesión</button>
+          <button id="ig2faBtn" onclick="igSubmit2fa()" class="hidden px-3 py-2 rounded-lg bg-brand-600 hover:bg-brand-700 text-white text-sm font-semibold">Enviar código</button>
+          <button onclick="closeIgModal()" class="px-3 py-2 rounded-lg bg-slate-200 dark:bg-slate-800 text-sm">Cerrar</button>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -104,7 +139,7 @@
     const $ = (id) => document.getElementById(id);
     const urlInput = $('urlInput'), extractBtn = $('extractBtn');
     const extractSpinner = $('extractSpinner'), extractLabel = $('extractLabel');
-    const errorBox = $('errorBox'), errorText = $('errorText');
+    const errorBox = $('errorBox'), errorText = $('errorText'), errorAction = $('errorAction');
     const results = $('results'), empty = $('empty'), grid = $('grid');
     const selectAll = $('selectAll'), countLabel = $('countLabel'), downloadBtn = $('downloadBtn');
 
@@ -155,10 +190,151 @@
     refreshCookies();
 
     // ----------------------------------------------------------------- //
+    // Sesión de Instagram (Playwright — refresh / login / 2FA)
+    // ----------------------------------------------------------------- //
+    const igBtn = $('igBtn'), igModal = $('igModal'), igStatus = $('igStatus');
+    const igCreds = $('igCreds'), ig2fa = $('ig2fa'), igRefreshBtn = $('igRefreshBtn');
+    const igLoginBtn = $('igLoginBtn'), ig2faBtn = $('ig2faBtn');
+    let igSessionId = null, igPollTimer = null;
+
+    igBtn.addEventListener('click', openIgModal);
+
+    async function openIgModal() {
+      igModal.classList.remove('hidden');
+      igCreds.classList.add('hidden'); ig2fa.classList.add('hidden');
+      ig2faBtn.classList.add('hidden'); igLoginBtn.classList.add('hidden');
+      igRefreshBtn.disabled = true;
+      igStatus.textContent = 'Consultando estado…';
+      try {
+        const d = await (await fetch('/api/auth/instagram/state')).json();
+        if (!d.playwright) {
+          igStatus.textContent = '⚠️ Playwright no instalado en el contenedor. Rebuild: docker compose build --no-cache && docker compose up -d';
+          igRefreshBtn.classList.add('hidden');
+          return;
+        }
+        igRefreshBtn.classList.remove('hidden');
+        igRefreshBtn.disabled = false;
+        igLoginBtn.classList.remove('hidden');          // re-login (env o UI creds)
+        const parts = [];
+        parts.push(d.state_file ? '✅ sesión guardada (reutilizable)' : '⚠️ sin sesión guardada aún');
+        parts.push(d.cookies ? '✅ cookies.txt presente' : '⚠️ sin cookies.txt');
+        parts.push(d.env_creds ? '✅ credenciales env' : 'ℹ️ sin env creds');
+        igStatus.textContent = parts.join(' · ');
+        // Sin env creds: el re-login pedirá usuario/contraseña aquí.
+        if (!d.env_creds) igCreds.classList.remove('hidden');
+      } catch (e) {
+        igStatus.textContent = 'No se pudo consultar el estado: ' + e.message;
+      }
+    }
+
+    function closeIgModal() {
+      igModal.classList.add('hidden');
+      if (igPollTimer) { clearInterval(igPollTimer); igPollTimer = null; }
+    }
+
+    async function igRefresh() {
+      igRefreshBtn.disabled = true;
+      igStatus.textContent = '🔄 Abriendo Chromium y refrescando sesión… (10-30s)';
+      try {
+        const r = await fetch('/api/auth/instagram/refresh', { method: 'POST' });
+        const d = await r.json();
+        if (d.status === 'ok') {
+          igStatus.textContent = '✅ Sesión refrescada (' + d.cookies + ' cookies). Ya puedes extraer.';
+          refreshCookies();
+        } else if (d.status === 'needs_login') {
+          igStatus.textContent = '🔒 Sesión caducada. Introduce usuario/contraseña y pulsa "Iniciar sesión".';
+          if (igCreds.classList.contains('hidden')) igCreds.classList.remove('hidden');
+        } else if (d.status === 'needs_2fa') {
+          igStatus.textContent = '🔐 Instagram pide 2FA. Pulsa "Iniciar sesión" para introducir el código.';
+        } else {
+          igStatus.textContent = '❌ ' + (d.error || 'refresco falló');
+        }
+      } catch (e) {
+        igStatus.textContent = 'Error: ' + e.message;
+      } finally {
+        igRefreshBtn.disabled = false;
+      }
+    }
+
+    async function igLogin() {
+      const body = {};
+      const u = $('igUser').value.trim(), p = $('igPass').value.trim();
+      if (u) body.username = u;
+      if (p) body.password = p;
+      igLoginBtn.disabled = true;
+      igStatus.textContent = '🔑 Iniciando login en Chromium… (10-30s)';
+      try {
+        const r = await fetch('/api/auth/instagram', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || 'login falló'); }
+        const d = await r.json();
+        igSessionId = d.session_id;
+        igStatus.textContent = '⏳ Login en curso…';
+        pollIgStatus();
+      } catch (e) {
+        igStatus.textContent = '❌ ' + e.message;
+      } finally {
+        igLoginBtn.disabled = false;
+      }
+    }
+
+    function pollIgStatus() {
+      if (igPollTimer) clearInterval(igPollTimer);
+      igPollTimer = setInterval(async () => {
+        try {
+          const d = await (await fetch('/api/auth/instagram/status?session_id=' + encodeURIComponent(igSessionId))).json();
+          if (d.status === 'logging_in') {
+            igStatus.textContent = '⏳ Login en curso…';
+          } else if (d.status === 'needs_2fa') {
+            igStatus.textContent = '🔐 Introduce el código que Instagram te envió.';
+            ig2fa.classList.remove('hidden'); ig2faBtn.classList.remove('hidden');
+            clearInterval(igPollTimer); igPollTimer = null;
+          } else if (d.status === 'ok') {
+            igStatus.textContent = '✅ Sesión iniciada. Ya puedes extraer.';
+            ig2fa.classList.add('hidden'); ig2faBtn.classList.add('hidden'); igCreds.classList.add('hidden');
+            clearInterval(igPollTimer); igPollTimer = null;
+            refreshCookies();
+          } else { // error / expired
+            igStatus.textContent = '❌ ' + (d.error || d.status);
+            clearInterval(igPollTimer); igPollTimer = null;
+          }
+        } catch (_) { /* fallo transitorio de red: seguir polleando */ }
+      }, 2500);
+    }
+
+    async function igSubmit2fa() {
+      const code = $('igCode').value.trim();
+      if (!code || !igSessionId) { igStatus.textContent = 'Falta el código o no hay sesión activa.'; return; }
+      ig2faBtn.disabled = true;
+      try {
+        const r = await fetch('/api/auth/instagram/2fa', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: igSessionId, code })
+        });
+        if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.detail || '2FA falló'); }
+        igStatus.textContent = '⏳ Verificando código…';
+        pollIgStatus();
+      } catch (e) {
+        igStatus.textContent = '❌ ' + e.message;
+      } finally {
+        ig2faBtn.disabled = false;
+      }
+    }
+
+    // ----------------------------------------------------------------- //
     // Errores
     // ----------------------------------------------------------------- //
-    function showError(msg) {
+    function showError(msg, actionLabel, actionFn) {
       errorText.textContent = msg;
+      if (actionLabel && actionFn) {
+        errorAction.textContent = actionLabel;
+        errorAction.onclick = actionFn;
+        errorAction.classList.remove('hidden');
+      } else {
+        errorAction.classList.add('hidden');
+        errorAction.onclick = null;
+      }
       errorBox.classList.remove('hidden');
     }
     function clearError() { errorBox.classList.add('hidden'); }
@@ -196,7 +372,13 @@
         renderGrid();
         results.classList.remove('hidden');
       } catch (e) {
-        showError(e.message || 'Error desconocido al extraer.');
+        const m = e.message || 'Error desconocido al extraer.';
+        // Sesión de Instagram rechazada -> ofrecer renovación vía Playwright.
+        if (/renovar sesión|ig-refresh|2fa|🔑/i.test(m)) {
+          showError(m, '🔑 Renovar sesión IG', openIgModal);
+        } else {
+          showError(m);
+        }
         empty.classList.remove('hidden');
       } finally {
         setLoading(false);

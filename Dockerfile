@@ -18,12 +18,17 @@ RUN ARCH=$(case "$(uname -m)" in x86_64|amd64) echo linux-x64;; aarch64|arm64) e
 
 WORKDIR /app
 
+COPY requirements.txt .
 # Dependencias de Python (FastAPI/uvicorn/httpx/multipart) + las herramientas CLI.
 # --upgrade para gallery-dl/yt-dlp: Instagram/X cambian frecuentemente sus APIs
 # y la versión de la imagen base puede quedar obsoleta. Rebuild con --no-cache
 # fuerza la última versión publicada en PyPI.
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade -r requirements.txt gallery-dl yt-dlp
+#
+# Playwright + Chromium headless para el refresco automático de sesión de
+# Instagram (ig_auth.py, Opción A+D). `--with-deps` instala las libs de SO que
+# Chromium necesita. Añade ~250-300 MB a la imagen; ver INSTAGRAM_SESSION_REFRESH.md.
+RUN pip install --no-cache-dir --upgrade -r requirements.txt gallery-dl yt-dlp \
+    && playwright install --with-deps chromium
 
 # Código de la aplicación
 COPY . .

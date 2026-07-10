@@ -2,3 +2,7 @@ fastapi==0.111.0
 uvicorn[standard]==0.30.0
 httpx==0.27.0
 python-multipart==0.0.9
+# Playwright para el refresco automático de sesión de Instagram (ig_auth.py).
+# Sin pin: --upgrade en el Dockerfile trae la última versión con su chromium
+# equivalente, igual que gallery-dl/yt-dlp. Rebuild --no-cache para actualizar.
+playwright
